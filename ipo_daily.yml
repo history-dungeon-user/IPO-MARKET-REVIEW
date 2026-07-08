@@ -1,0 +1,51 @@
+name: 1) IPO 일일 자동화
+
+on:
+  # 매일 09:30 UTC = 18:30 KST 실행 (KST 조정은 아래 cron 값만 바꾸면 됨)
+  schedule:
+    - cron: "30 9 * * *"
+  # 필요 시 수동 실행
+  workflow_dispatch:
+
+# 산출물을 저장소에 커밋하려면 쓰기 권한 필요
+permissions:
+  contents: write
+
+concurrency:
+  group: ipo-daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: ipo_daily.py 실행
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: python ipo_daily.py
+
+      - name: 산출물 커밋·푸시
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A \
+            IPO_analysis.xlsx index.html events.csv offerings.csv \
+            kind_master.json kind_findata.json listing_master.json \
+            offering_master.json kind_changes.log kind_current.csv 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "변경 없음 — 커밋 생략"
+          else
+            git commit -m "chore: IPO 데이터 자동 갱신 $(date -u +%Y-%m-%d) [skip ci]"
+            git push
+          fi

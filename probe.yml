@@ -1,0 +1,26 @@
+name: 0) 접속 실측 (KIND/DART)
+
+# 본 자동화를 켜기 전에 먼저 이 워크플로를 수동 실행해
+# GitHub 러너에서 KIND·DART 가 열리는지 확인한다.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: KIND/DART 접속 실측
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: python ci_probe.py
