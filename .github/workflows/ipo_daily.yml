@@ -16,30 +16,30 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: 체크아웃
+      - name: checkout
         uses: actions/checkout@v4
 
-      - name: Python 설정
+      - name: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: 의존성 설치
+      - name: install deps
         run: pip install -r requirements.txt
 
-      - name: ipo_daily.py 실행
+      - name: run ipo_daily
         env:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
         run: python ipo_daily.py
 
-- name: 산출물 커밋·푸시
+      - name: commit outputs
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "변경 없음 — 커밋 생략"
+            echo "no changes"
           else
-            git commit -m "chore: IPO 데이터 자동 갱신 $(date -u +%Y-%m-%d) [skip ci]"
+            git commit -m "chore: update IPO data [skip ci]"
             git push
           fi
