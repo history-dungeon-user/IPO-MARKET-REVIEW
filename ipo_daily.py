@@ -417,6 +417,23 @@ def _load_listing_seed():
     p = os.path.join(BASE, "listing_seed.json")
     return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else []
 
+def _norm_name(s):
+    """상장사 이름 매칭용 정규화 키.
+    시드 표기와 KIND 라이브 표기의 철자 차이를 흡수한다.
+    예) 신한스팩18호 = 신한제18호스팩, 교보스팩20호 = 교보20호스팩,
+        키움히어로스펙2호 = 키움히어로제2호스팩, NH스팩33호 = 엔에이치스팩33호,
+        케이뱅크 (유가) = 케이뱅크
+    표시용 이름(기업명)은 건드리지 않고, 매칭 키로만 사용한다.
+    """
+    s = (s or "").lower().strip()
+    s = re.sub(r"\(.*?\)", "", s)      # (유가)/(코스닥) 등 시장 표기 제거
+    s = re.sub(r"\s+", "", s)          # 공백 제거
+    s = s.replace("엔에이치", "nh")     # 스폰서 약어 통일
+    if "스팩" in s or "스펙" in s:      # 스팩류만 강한 정규화(제/호/스팩 순서 차이 흡수)
+        s = s.replace("스팩", "").replace("스펙", "")
+        s = s.replace("제", "").replace("호", "")
+    return s
+
 def build_excel(kind_data, kind_master, offering, listings):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -520,16 +537,21 @@ def build_excel(kind_data, kind_master, offering, listings):
         r += 1
 
     # 상장 완료: 시드 + 신규상장 페이지 병합 (상장일은 페이지 기준 갱신)
-    seed = {x["기업명"]: x for x in _load_listing_seed()}
+    _seed_list = _load_listing_seed()
+    seed = {x["기업명"]: x for x in _seed_list}
+    norm_index = {_norm_name(x["기업명"]): x["기업명"] for x in _seed_list}
     if listings:
         for l in listings:
             nm = l["회사명"]
-            spac = ("스팩" in nm or "스펙" in nm) and "합병" not in l.get("상장유형","")
-            if nm in seed:
+            key = _norm_name(nm)
+            if key in norm_index:                 # 정규화 일치 → 기존 시드 행 갱신(중복 방지)
+                seed[norm_index[key]]["상장일"] = l["상장일"]
+            elif nm in seed:
                 seed[nm]["상장일"] = l["상장일"]
-            else:
+            else:                                  # 시드에 없는 신규 상장 → 추가
                 seed[nm] = {"기업명": nm, "상장일": l["상장일"],
                             "진행상태": "상장완료" + ("(스팩합병)" if "합병" in l.get("상장유형","") else "")}
+                norm_index[key] = nm
     FIELDS = ["기업명","수요예측기간","밴드","공모주식수","공모금액","멀티플","확정공모가",
               "수요예측경쟁률","참여기관수","청약일정","청약경쟁률","상장예정일","상장일",
               "대표주관","공동주관","인수수수료","수수료율","진행상태"]
