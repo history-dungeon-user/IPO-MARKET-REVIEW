@@ -379,7 +379,7 @@ def collect_kind():
             print(f"  [경고] 상세 실패 {rec['회사명']}: {e}")
     kw.save_json(kw.FINDATA, fin)
 
-    def build(rows, datefn):
+    def build(rows, datefn, status=None):
         out = []
         for rec in rows:
             f = fin.get(kw.fkey(rec["회사명"], rec["청구일"]), {})
@@ -391,14 +391,43 @@ def collect_kind():
                 "기준연도": base_year, "매출액": f.get("매출액",""),
                 "순이익": f.get("순이익",""), "자기자본": f.get("자기자본",""),
                 "업종": f.get("업종",""), "단위": unit,
-                "대표주관사": kw.abbr(rec["상장주선인"])})
+                "대표주관사": kw.abbr(rec["상장주선인"]),
+                "현황": status if status is not None else (rec.get("심사결과") or "")})
         out.sort(key=lambda r: r["일자"], reverse=True)
         return out
 
+    # ── 승인 탭: live 목록이 아닌 누적 master 기준 (올해 승인 전체·상장완료 포함) ──
+    #   승인 = 심사승인/상장승인/공모철회/상장철회 (재상장 제외) · 일자 = 승인일(결과확정일)
+    APPMAP = {"심사승인": "상장전", "상장승인": "상장완료",
+              "공모철회": "공모철회", "상장철회": "상장철회"}
+    lseed = {_norm_name(x["기업명"]): (x.get("상장일") or "")
+             for x in _load_listing_seed()}
+    appr = []
+    for rec in store.values():
+        res = (rec.get("심사결과") or "").replace(" ", "")
+        ty = (rec.get("상장유형") or "").replace(" ", "")
+        rd = (rec.get("결과확정일") or "")
+        if res not in APPMAP or ty == "재상장" or not rd.startswith(kw.YEAR):
+            continue
+        f = fin.get(kw.fkey(rec.get("회사명",""), rec.get("청구일","")), {})
+        unit = f.get("단위", "백만원"); cy = (rec.get("청구일") or "")[:4]
+        base_year = "2024" if "FY24" in unit else (str(int(cy)-1) if cy.isdigit() else "")
+        ld = lseed.get(_norm_name(rec.get("회사명","")), "") if res == "상장승인" else ""
+        hyun = APPMAP[res] + (f" ({ld})" if ld and ld != "수집예정" else "")
+        appr.append({"일자": rd, "회사명": rec.get("회사명",""),
+            "유가": f.get("유가") or ("Y" if rec.get("시장")=="유가" else ""),
+            "상장유형": rec.get("상장유형",""), "심사결과": rec.get("심사결과",""),
+            "기준연도": base_year, "매출액": f.get("매출액",""),
+            "순이익": f.get("순이익",""), "자기자본": f.get("자기자본",""),
+            "업종": f.get("업종",""), "단위": unit,
+            "대표주관사": kw.abbr(rec.get("상장주선인","")),
+            "현황": hyun})
+    appr.sort(key=lambda r: r["일자"], reverse=True)
+
     DATA = {"asof": kw.TODAY, "year": kw.YEAR,
             "fin_basis": "청구일 직전 사업연도 · 별도/개별 재무제표 · 단위 백만원(별도 표기 시 USD)",
-            "tables": {"신청": build(t_apply, lambda r: r["청구일"]),
-                       "승인": build(t_appr, result_date),
+            "tables": {"신청": build(t_apply, lambda r: r["청구일"], "예심 진행중"),
+                       "승인": appr,
                        "철회미승인": build(t_drop, result_date)}}
     DATA["counts"] = {k: len(v) for k, v in DATA["tables"].items()}
     html = kw.TEMPLATE.replace("__DATA__", json.dumps(DATA, ensure_ascii=False))
@@ -459,7 +488,7 @@ def build_excel(kind_data, kind_master, offering, listings):
     r = 1
     ws1.cell(r,1,"IPO 상장예비심사 현황").font = F(True,14); r += 1
     ws1.cell(r,1,f"기준일 {kind_data['asof']} · {kind_data['fin_basis']}").font = F(size=9,color="808080"); r += 2
-    cols1 = ["일자","회사명","시장","상장유형","기준연도","매출액","순이익","자기자본","업종","대표주관사"]
+    cols1 = ["일자","회사명","시장","상장유형","기준연도","매출액","순이익","자기자본","업종","대표주관사","현황"]
     for block, label in [("신청","■ 심사 신청(진행중)"),("승인","■ 심사 승인"),("철회미승인","■ 철회·미승인")]:
         rows = kind_data["tables"][block]
         ws1.cell(r,1,f"{label}  ({len(rows)}건)").font = F(True,10,"1F3864")
@@ -475,13 +504,13 @@ def build_excel(kind_data, kind_master, offering, listings):
                     row.get("상장유형","") or row.get("심사결과",""),
                     f"FY{row['기준연도'][2:]}" if row.get("기준연도") else "",
                     row.get("매출액",""), row.get("순이익",""), row.get("자기자본",""),
-                    row.get("업종",""), row.get("대표주관사","")]
+                    row.get("업종",""), row.get("대표주관사",""), row.get("현황","")]
             for i,v in enumerate(vals,1):
                 cell = ws1.cell(r,i,v); cell.font=F(); cell.border=BORD
                 cell.alignment = RIG if i in (6,7,8) else CEN
             r += 1
         r += 1
-    for col,w in zip("ABCDEFGHIJ",[11,16,7,12,8,12,11,11,26,16]):
+    for col,w in zip("ABCDEFGHIJK",[11,16,7,12,8,12,11,11,26,14,16]):
         ws1.column_dimensions[col].width = w
 
     # ── 탭2 공모~상장 ──
@@ -596,15 +625,18 @@ def build_excel(kind_data, kind_master, offering, listings):
     ws3.cell(r,1,"승인율=결과확정 시점 기준 · 상장=KIND 신규상장 페이지 기준(스팩·합병 포함)").font = F(size=9,color="808080"); r += 2
 
     agg = defaultdict(lambda: defaultdict(int))
+    # 승인 = 예심 통과(상장완료·미상장·후속철회 모두 포함) / 철회 = 예심 단계 반려
+    APPROVED_ST = {"심사승인", "상장승인", "공모철회", "상장철회"}
+    REJECTED_ST = {"심사철회", "심사미승인"}
     for rec in kind_master["records"].values():
-        c = {"청구서접수":"신청","심사승인":"승인","심사철회":"철회","심사미승인":"철회"}.get(
-            (rec.get("심사결과") or "").replace(" ",""), "")
+        res = (rec.get("심사결과") or "").replace(" ", "")
+        ty = (rec.get("상장유형") or "").replace(" ", "")
         cd = (rec.get("청구일") or "")[:7]
         rd = ((rec.get("결과확정일") or rec.get("청구일")) or "")[:7]
         if cd.startswith(kind_data["year"]): agg[cd]["청구"] += 1
-        if rd.startswith(kind_data["year"]):
-            if c == "승인": agg[rd]["승인"] += 1
-            if c == "철회": agg[rd]["철회"] += 1
+        if rd.startswith(kind_data["year"]) and ty != "재상장":  # 재상장 제외
+            if res in APPROVED_ST: agg[rd]["승인"] += 1
+            elif res in REJECTED_ST: agg[rd]["철회"] += 1
     for l in (listings or []):
         m = (l.get("상장일") or "")[:7]
         if m.startswith(kind_data["year"]): agg[m]["상장"] += 1
@@ -662,6 +694,346 @@ def build_excel(kind_data, kind_master, offering, listings):
     wb.save(XLSX_OUT)
     print(f"[EXCEL] {os.path.basename(XLSX_OUT)} 생성 완료 "
           f"(상장 {len(listed_rows)} · 진행 {len(prog)})")
+
+    # 웹 대시보드용 계산 결과 반환 (엑셀 탭2·탭3와 동일 값 재사용)
+    return {
+        "listed": listed_rows,
+        "prog": prog,
+        "monthly": [{"월": m, "청구": agg[m]["청구"], "승인": agg[m]["승인"],
+                     "철회": agg[m]["철회"], "상장": agg[m]["상장"]} for m in sorted(agg)],
+        "share": [{"대표주관사": k, "건수": v[0], "공모금액": v[1]}
+                  for k, v in sorted(share.items(), key=lambda x: -x[1][1])],
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# [4-b] 웹 대시보드 (index.html) — 예심 / 공모·상장 / 분석 3탭 (기간필터·엑셀 다운로드)
+#   ※ 데이터는 build_excel 이 계산한 값 그대로 재사용(엑셀과 동일).
+#      수집·발췌 로직은 건드리지 않음.
+# ════════════════════════════════════════════════════════════════════
+DASH_TEMPLATE = """<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IPO 시장 동향</title>
+<style>
+  :root{--navy:#1F3864;--sub:#D9E1F2;--line:#D6DCE5;--muted:#6B7280;--bg:#F4F6FA;--red:#9A3B3B;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:#1a1a1a;
+       font-family:"맑은 고딕","Malgun Gothic",system-ui,sans-serif;font-size:14px;line-height:1.5;}
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 18px 60px;}
+  h1{font-size:22px;margin:0 0 4px;color:var(--navy);}
+  .asof{color:var(--muted);font-size:12.5px;margin-bottom:16px;}
+  .tabs{display:flex;gap:6px;border-bottom:2px solid var(--navy);margin-bottom:2px;flex-wrap:wrap;}
+  .tabs button{border:1px solid var(--line);border-bottom:none;background:#fff;color:var(--muted);
+      padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;border-radius:8px 8px 0 0;}
+  .tabs button.active{background:var(--navy);color:#fff;border-color:var(--navy);}
+  .pane{display:none;background:#fff;border:1px solid var(--line);border-top:none;
+        padding:18px 16px 24px;border-radius:0 0 10px 10px;}
+  .pane.active{display:block;}
+  .sec{font-weight:700;color:var(--navy);margin:18px 0 8px;font-size:15px;}
+  .sec:first-child{margin-top:4px;}
+  .cnt{color:var(--muted);font-weight:600;font-size:13px;}
+  .note{color:var(--muted);font-size:12px;margin-top:6px;}
+  .search{margin:2px 0 10px;}
+  .search input{width:260px;max-width:70%;padding:8px 12px;border:1px solid var(--line);
+      border-radius:8px;font-size:14px;}
+  .tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;}
+  table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap;}
+  thead th{background:var(--navy);color:#fff;font-weight:600;padding:9px 10px;text-align:center;
+      position:sticky;top:0;}
+  tbody td{padding:8px 10px;border-top:1px solid #EEF1F6;text-align:center;}
+  tbody tr:nth-child(even){background:#FafBfD;}
+  tbody tr:hover{background:#EEF3FB;}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;}
+  td.name{text-align:left;font-weight:600;}
+  .dash{color:#C7CDD6;}
+  .empty{color:var(--muted);padding:16px;}
+  .totrow td{font-weight:700;background:#FCE4D6 !important;}
+  .ctrl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:2px 0 14px;
+        padding:10px 12px;background:#F7F9FC;border:1px solid var(--line);border-radius:9px;}
+  .ctrl label{font-size:12.5px;color:var(--muted);font-weight:700;}
+  .ctrl .ipt{padding:7px 11px;border:1px solid var(--line);border-radius:7px;font-size:13.5px;width:190px;}
+  .ctrl .dt{padding:6px 8px;border:1px solid var(--line);border-radius:7px;font-size:13px;}
+  .preset{border:1px solid var(--line);background:#fff;color:var(--muted);
+          padding:6px 10px;border-radius:6px;font-size:12.5px;cursor:pointer;}
+  .preset:hover{background:var(--sub);}
+  .btn-dl{margin-left:auto;border:1px solid var(--navy);background:var(--navy);color:#fff;
+          padding:8px 15px;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;}
+  .btn-dl:hover{opacity:.9;}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;}
+  .seg .segbtn{border:none;background:#fff;color:var(--muted);padding:8px 16px;
+               font-size:13px;font-weight:700;cursor:pointer;}
+  .seg .segbtn.active{background:var(--navy);color:#fff;}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body><div class="wrap">
+  <h1>IPO 시장 동향</h1>
+  <div class="asof" id="asof"></div>
+  <div class="tabs">
+    <button data-t="t1" class="active">예심</button>
+    <button data-t="t2">공모 · 상장</button>
+    <button data-t="t3">분석</button>
+  </div>
+  <div class="pane active" id="t1">
+    <div class="ctrl">
+      <input id="q" class="ipt" placeholder="회사명 검색…" autocomplete="off">
+      <label>기간</label>
+      <input type="date" id="t1from" class="dt"> ~ <input type="date" id="t1to" class="dt">
+      <button class="preset" data-tab="t1" data-p="all">전체</button>
+      <button class="preset" data-tab="t1" data-p="year">올해</button>
+      <button class="preset" data-tab="t1" data-p="q">최근3개월</button>
+      <button class="btn-dl" id="dl1">⬇ 엑셀</button>
+    </div>
+    <div id="t1body"></div>
+  </div>
+  <div class="pane" id="t2">
+    <div class="ctrl">
+      <div class="seg">
+        <button class="segbtn active" data-v="listed">상장 완료</button>
+        <button class="segbtn" data-v="prog">공모 진행</button>
+      </div>
+      <span id="t2date">
+        <label>상장일</label>
+        <input type="date" id="t2from" class="dt"> ~ <input type="date" id="t2to" class="dt">
+        <button class="preset" data-tab="t2" data-p="all">전체</button>
+        <button class="preset" data-tab="t2" data-p="year">올해</button>
+        <button class="preset" data-tab="t2" data-p="q">최근3개월</button>
+      </span>
+      <button class="btn-dl" id="dl2">⬇ 엑셀</button>
+    </div>
+    <div id="t2body"></div>
+  </div>
+  <div class="pane" id="t3">
+    <div class="ctrl">
+      <label>기간(월)</label>
+      <input type="date" id="t3from" class="dt"> ~ <input type="date" id="t3to" class="dt">
+      <button class="preset" data-tab="t3" data-p="all">전체</button>
+      <button class="preset" data-tab="t3" data-p="year">올해</button>
+      <button class="preset" data-tab="t3" data-p="q">최근3개월</button>
+      <button class="btn-dl" id="dl3">⬇ 엑셀</button>
+    </div>
+    <div id="t3body"></div>
+  </div>
+</div>
+<script>
+const D = __DATA__;
+function isoAsof(){ var a=String(D.asof||''); return /^\\d{8}$/.test(a) ? a.slice(0,4)+'-'+a.slice(4,6)+'-'+a.slice(6,8) : a.slice(0,10); }
+document.getElementById('asof').textContent =
+  '기준일 ' + isoAsof() + ' · ' + D.year + '년 · 단위 백만원 · 출처 KIND·DART';
+
+let T2VIEW = 'listed';
+let EXPORT = {t1:null, t2:null, t3:null};
+function val(id){ var e=document.getElementById(id); return e?(e.value||''):''; }
+function inRange(d, from, to){
+  if(!from && !to) return true;
+  if(!d) return false;
+  var x = String(d).slice(0,10);
+  if(from && x < from) return false;
+  if(to && x > to) return false;
+  return true;
+}
+function monthInRange(mo, from, to){
+  if(!from && !to) return true;
+  if(!mo) return false;
+  var f = from?from.slice(0,7):'', t = to?to.slice(0,7):'';
+  if(f && mo < f) return false;
+  if(t && mo > t) return false;
+  return true;
+}
+function stamp(from,to){ return (!from && !to) ? '전체' : (from||'')+'~'+(to||''); }
+function download(tabKey){
+  var p = EXPORT[tabKey]; if(!p || typeof XLSX==='undefined') return;
+  var wb = XLSX.utils.book_new();
+  p.sheets.forEach(function(s){
+    var aoa = [s.cols.map(function(c){return c[1];})];
+    s.rows.forEach(function(r){ aoa.push(s.cols.map(function(c){ var v=r[c[0]]; return (v===undefined||v===null)?'':v; })); });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), (s.name||'Sheet').slice(0,28));
+  });
+  XLSX.writeFile(wb, p.fname||'export.xlsx');
+}
+function applyPreset(tab,p){
+  var today = isoAsof(), from='', to='';
+  if(p==='year'){ from = D.year+'-01-01'; to = today; }
+  else if(p==='q'){ var d=new Date(today); d.setMonth(d.getMonth()-3); from=d.toISOString().slice(0,10); to=today; }
+  document.getElementById(tab+'from').value = from;
+  document.getElementById(tab+'to').value = to;
+  rerender(tab);
+}
+function rerender(tab){ if(tab==='t1') renderT1(); else if(tab==='t2') renderT2(); else renderT3(); }
+
+function esc(v){ return (v===null||v===undefined)?'':String(v); }
+function tbl(rows, cols, opts){
+  opts = opts || {};
+  let h = '<div class="tblwrap"><table><thead><tr>';
+  h += cols.map(c=>`<th class="${c[2]?'num':''}">${c[1]}</th>`).join('');
+  h += '</tr></thead><tbody>';
+  if(!rows.length){
+    h += `<tr><td class="empty" colspan="${cols.length}">해당 없음</td></tr>`;
+  } else {
+    for(const r of rows){
+      const tot = opts.totalKey && r[opts.totalKey];
+      h += tot ? '<tr class="totrow">' : '<tr>';
+      h += cols.map((c,i)=>{
+        const v = esc(r[c[0]]);
+        const cls = (c[2]?'num':'') + (i===0 && !c[2] ? ' name':'');
+        return `<td class="${cls}">${v===''?'<span class="dash">–</span>':v}</td>`;
+      }).join('');
+      h += '</tr>';
+    }
+  }
+  return h + '</tbody></table></div>';
+}
+
+/* ── 탭1 예심 ── */
+const SCR = [["일자","일자"],["회사명","회사명"],["시장","시장"],["상장유형","상장유형"],
+  ["현황","현황"],["기준연도","기준연도"],["매출액","매출액",1],["순이익","순이익",1],
+  ["자기자본","자기자본",1],["업종","업종"],["대표주관사","대표주관사"]];
+function renderT1(){
+  const q = (val('q')).trim(), from = val('t1from'), to = val('t1to');
+  const blocks = [["신청","심사 신청(진행중)"],["승인","심사 승인"],["철회미승인","철회·미승인"]];
+  let h = ''; const sheets = [];
+  for(const [k,label] of blocks){
+    let rows = (D.screening[k] || []).filter(r => inRange(r['일자'], from, to));
+    if(q) rows = rows.filter(r => (r['회사명']||'').includes(q));
+    h += `<div class="sec">${label} <span class="cnt">(${rows.length}건)</span></div>`;
+    h += tbl(rows, SCR);
+    sheets.push({name: label.replace(/[^가-힣A-Za-z0-9]/g,''), cols: SCR, rows: rows});
+  }
+  document.getElementById('t1body').innerHTML = h;
+  EXPORT.t1 = {sheets: sheets, fname: '예심_'+stamp(from,to)+'.xlsx'};
+}
+
+/* ── 탭2 공모·상장 ── */
+const LISTED = [["기업명","기업명"],["상장일","상장일"],["밴드","공모가밴드"],
+  ["공모주식수","공모주식수",1],["공모금액","공모금액",1],["멀티플","밸류 멀티플"],
+  ["확정공모가","확정공모가"],["수요예측경쟁률","수요예측경쟁률"],
+  ["청약경쟁률","청약경쟁률"],["대표주관","대표주관"],["진행상태","상태"]];
+const PROG = [["회사명","기업명"],["수요예측기간","수요예측기간"],["밴드","공모가밴드"],
+  ["공모주식수","공모주식수",1],["공모금액","공모금액",1],["멀티플","밸류 멀티플"],
+  ["확정공모가","확정공모가"],["수요예측경쟁률","수요예측경쟁률"],
+  ["청약경쟁률","청약경쟁률"],["상장예정일","상장예정일"],["대표주관","대표주관"],["상태","상태"]];
+function renderT2(){
+  const dc = document.getElementById('t2date');
+  if(dc) dc.style.display = (T2VIEW==='listed') ? '' : 'none';
+  let h = '';
+  if(T2VIEW === 'listed'){
+    const from = val('t2from'), to = val('t2to');
+    const rows = D.listed.filter(r => inRange(r['상장일'], from, to));
+    h += `<div class="sec">상장 완료 (${D.year}) <span class="cnt">(${rows.length}건)</span></div>`;
+    h += tbl(rows, LISTED);
+    h += '<div class="note">※ 상장 완료 = KIND 신규상장 페이지 기준(스팩합병 포함) · '
+       + '공모금액 = 밴드 하단(확정 시 확정총액) · 상장일 기준 기간 조회.</div>';
+    EXPORT.t2 = {sheets:[{name:'상장완료', cols:LISTED, rows:rows}], fname:'상장완료_'+stamp(from,to)+'.xlsx'};
+  } else {
+    const rows = D.prog;
+    h += `<div class="sec">공모 진행 (예심 승인법인) <span class="cnt">(${rows.length}건)</span></div>`;
+    h += tbl(rows, PROG);
+    h += '<div class="note">※ 공모 진행 = 예심 승인 후 공모 절차 진행 중(미상장). 기간 필터 미적용.</div>';
+    EXPORT.t2 = {sheets:[{name:'공모진행', cols:PROG, rows:rows}], fname:'공모진행.xlsx'};
+  }
+  document.getElementById('t2body').innerHTML = h;
+}
+
+/* ── 탭3 분석 ── */
+const MONTH = [["월","월"],["청구","청구",1],["승인","승인",1],
+  ["철회","철회·미승인",1],["상장","상장",1],["승인율","예심 승인율"]];
+const SHARE = [["대표주관사","대표주관사"],["건수","건수",1],["공모금액","공모금액",1]];
+function renderT3(){
+  const from = val('t3from'), to = val('t3to');
+  const src = D.monthly.filter(m => monthInRange(m['월'], from, to));
+  const tot = {청구:0, 승인:0, 철회:0, 상장:0};
+  const rows = src.map(function(m){
+    tot.청구+=m.청구; tot.승인+=m.승인; tot.철회+=m.철회; tot.상장+=m.상장;
+    var den = m.승인 + m.철회;
+    return {월:m.월, 청구:m.청구, 승인:m.승인, 철회:m.철회, 상장:m.상장,
+            승인율: den ? (m.승인/den*100).toFixed(1)+'%' : '-'};
+  });
+  var tden = tot.승인 + tot.철회;
+  const disp = rows.concat([{월:'합계', 청구:tot.청구, 승인:tot.승인, 철회:tot.철회, 상장:tot.상장,
+            승인율: tden ? (tot.승인/tden*100).toFixed(1)+'%' : '-', 합계:true}]);
+  let h = '<div class="sec">① 월별 예심 · 상장 현황 및 승인율</div>';
+  h += tbl(disp, MONTH, {totalKey:"합계"});
+  h += '<div class="sec">② 주관사별 점유율 (공모 확보분) <span class="cnt">(전체 기간)</span></div>';
+  h += tbl(D.share, SHARE);
+  document.getElementById('t3body').innerHTML = h;
+  EXPORT.t3 = {sheets:[{name:'월별현황', cols:MONTH, rows:disp}, {name:'주관사점유율', cols:SHARE, rows:D.share}], fname:'분석_'+stamp(from,to)+'.xlsx'};
+}
+
+document.querySelectorAll('.tabs button').forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById(b.dataset.t).classList.add('active');
+  };
+});
+document.querySelectorAll('.seg .segbtn').forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll('.seg .segbtn').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active'); T2VIEW = b.dataset.v; renderT2();
+  };
+});
+document.querySelectorAll('.preset').forEach(b=>{ b.onclick = ()=>applyPreset(b.dataset.tab, b.dataset.p); });
+document.getElementById('q').addEventListener('input', renderT1);
+['t1from','t1to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT1));
+['t2from','t2to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT2));
+['t3from','t3to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT3));
+document.getElementById('dl1').onclick = ()=>download('t1');
+document.getElementById('dl2').onclick = ()=>download('t2');
+document.getElementById('dl3').onclick = ()=>download('t3');
+renderT1(); renderT2(); renderT3();
+</script></body></html>
+"""
+
+def build_dashboard(kind_data, web):
+    """엑셀과 동일한 데이터로 3탭 웹페이지(index.html)를 생성."""
+    def scr(rows):
+        out = []
+        for x in rows:
+            out.append({
+                "일자": x.get("일자",""), "회사명": x.get("회사명",""),
+                "시장": "유가" if x.get("유가") == "Y" else "코스닥",
+                "상장유형": x.get("상장유형","") or x.get("심사결과",""),
+                "현황": x.get("현황",""),
+                "기준연도": x.get("기준연도",""), "매출액": x.get("매출액",""),
+                "순이익": x.get("순이익",""), "자기자본": x.get("자기자본",""),
+                "업종": x.get("업종",""), "대표주관사": x.get("대표주관사","")})
+        return out
+
+    listed = [{
+        "기업명": x.get("기업명",""), "상장일": x.get("상장일",""),
+        "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
+        "공모금액": x.get("공모금액",""), "멀티플": x.get("멀티플",""),
+        "확정공모가": x.get("확정공모가",""), "수요예측경쟁률": x.get("수요예측경쟁률",""),
+        "청약경쟁률": x.get("청약경쟁률",""), "대표주관": x.get("대표주관",""),
+        "진행상태": x.get("진행상태","")} for x in web["listed"]]
+
+    prog = [{
+        "회사명": x.get("회사명",""), "수요예측기간": x.get("수요예측기간",""),
+        "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
+        "공모금액": x.get("공모금액",""), "멀티플": x.get("멀티플",""),
+        "확정공모가": x.get("확정공모가",""), "수요예측경쟁률": x.get("수요예측경쟁률",""),
+        "청약경쟁률": x.get("청약경쟁률",""), "상장예정일": x.get("상장예정일",""),
+        "대표주관": x.get("대표주관",""),
+        "상태": {"미제출":"신고서 대기"}.get(x.get("상태"), x.get("상태",""))} for x in web["prog"]]
+
+    # 월별은 원자료 그대로 전달 (승인율·합계는 웹에서 기간필터에 맞춰 재계산)
+    monthly = [{"월": m["월"], "청구": m["청구"], "승인": m["승인"],
+                "철회": m["철회"], "상장": m["상장"]} for m in web["monthly"]]
+
+    share = [{"대표주관사": s["대표주관사"], "건수": s["건수"],
+              "공모금액": f'{s["공모금액"]:,.0f}' if s["공모금액"] else ""} for s in web["share"]]
+
+    DATA = {"asof": kind_data["asof"], "year": kind_data["year"],
+            "screening": kind_data["tables"],
+            "listed": listed, "prog": prog, "monthly": monthly, "share": share}
+    html = DASH_TEMPLATE.replace("__DATA__", json.dumps(DATA, ensure_ascii=False))
+    with open(os.path.join(BASE, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"[WEB] index.html 3탭 생성 완료 "
+          f"(예심 {sum(len(v) for v in kind_data['tables'].values())} · "
+          f"상장 {len(listed)} · 진행 {len(prog)})")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -790,11 +1162,14 @@ def main():
         for c in ch: print("   -", c)
 
     # [4] 3탭 엑셀
-    build_excel(kind_data, kind_master, offering, listings)
+    web = build_excel(kind_data, kind_master, offering, listings)
+
+    # [4-b] 3탭 웹 대시보드 (index.html 재생성 · 엑셀과 동일 데이터)
+    build_dashboard(kind_data, web)
 
     # [5] 원장 CSV (분석·가공용)
     export_ledgers(kind_master, offering, listings)
-    print("\n[완료] IPO_analysis.xlsx / index.html / events.csv / offerings.csv 갱신")
+    print("\n[완료] IPO_analysis.xlsx / index.html(3탭) / events.csv / offerings.csv 갱신")
 
 if __name__ == "__main__":
     main()
