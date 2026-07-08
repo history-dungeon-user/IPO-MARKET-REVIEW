@@ -40,6 +40,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "no changes"
           else
-            git commit -m "chore: update IPO data [skip ci]"
+            git commit -m "chore: update IPO data"
             git push
           fi
