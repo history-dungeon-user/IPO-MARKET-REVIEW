@@ -1219,23 +1219,35 @@ def build_dashboard(kind_data, web):
                 "업종": x.get("업종",""), "대표주관사": x.get("대표주관사","")})
         return out
 
+    def _comma(v):
+        s = str(v).replace(",", "").strip()
+        return f"{int(s):,}" if s.isdigit() else (str(v) if v not in (None, "") else "")
+    def _fmt_sub(s):
+        m = re.match(r"\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*~\s*(?:(\d{1,2})-)?(\d{1,2})", str(s or ""))
+        if not m: return str(s or "")
+        y, mo, d1, mo2, d2 = m.groups()
+        mo, d1, d2 = int(mo), int(d1), int(d2)
+        if mo2 and int(mo2) != mo:
+            return f"{y}-{mo:02d}-{d1:02d}~{int(mo2):02d}-{d2:02d}"   # 월 바뀌면 MM-DD~MM-DD
+        return f"{y}-{mo:02d}-{d1:02d}~{d2:02d}"                        # 같은 월이면 MM-DD~DD
+
     listed = [{
         "기업명": x.get("기업명",""), "상장일": x.get("상장일",""),
         "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
         "공모금액": x.get("공모금액",""), "멀티플": x.get("멀티플",""),
-        "확정공모가": x.get("확정공모가",""), "참여기관수": x.get("참여기관수",""),
+        "확정공모가": _comma(x.get("확정공모가","")), "참여기관수": x.get("참여기관수",""),
         "수요예측경쟁률": x.get("수요예측경쟁률",""),
-        "청약기간": x.get("청약기간") or x.get("청약일정",""),
+        "청약기간": _fmt_sub(x.get("청약기간") or x.get("청약일정","")),
         "청약경쟁률": x.get("청약경쟁률",""), "대표주관": x.get("대표주관",""),
         "진행상태": x.get("진행상태","")} for x in web["listed"]]
 
     prog = [{
-        "회사명": x.get("회사명",""), "수요예측기간": x.get("수요예측기간",""),
+        "회사명": x.get("회사명",""), "수요예측기간": _fmt_sub(x.get("수요예측기간","")),
         "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
         "공모금액": x.get("공모금액",""), "멀티플": x.get("멀티플",""),
-        "확정공모가": x.get("확정공모가",""), "참여기관수": x.get("참여기관수",""),
+        "확정공모가": _comma(x.get("확정공모가","")), "참여기관수": x.get("참여기관수",""),
         "수요예측경쟁률": x.get("수요예측경쟁률",""),
-        "청약기간": x.get("청약일정",""),
+        "청약기간": _fmt_sub(x.get("청약일정","")),
         "청약경쟁률": x.get("청약경쟁률",""), "상장예정일": x.get("상장예정일",""),
         "대표주관": x.get("대표주관",""),
         "상태": {"미제출":"신고서 대기"}.get(x.get("상태"), x.get("상태",""))} for x in web["prog"]]
