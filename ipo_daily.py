@@ -300,10 +300,7 @@ def extract_demand(t):
     return out
 
 def extract_multiple(t):
-    """공모가 산정 요약표: 평가방법 · 평가모형(PER/PBR/EV·EBITDA) 배수"""
-    method = None
-    m = re.search(r"평가방법\s*\|\s*([가-힣]+)", t)
-    if m: method = m.group(1)
+    """공모가 산정 요약표 → '배수 (모형)' 형식 · 예: 24.57배 (PER)"""
     m = re.search(r"②[^\n]{0,4}\|?\s*(?:유사기업|유사회사|비교회사|비교기업|비교대상회사|비교대상기업)"
                   r"\s*(?:평균\s*)?(PER|PBR|EV\s*/?\s*EBITDA)\s*\|?\s*(?:배\s*\|?\s*)?([\d,]+\.?\d*)", t)
     if not m:
@@ -311,7 +308,7 @@ def extract_multiple(t):
                       r"\s*(?:평균\s*)?(PER|PBR|EV\s*/?\s*EBITDA)\s*\|?\s*(?:배\s*\|?\s*)?([\d,]+\.?\d*)\s*(?:배|x|X)", t)
     if m:
         kind = re.sub(r"\s", "", m.group(1)); mult = m.group(2)
-        return f"{method + ' · ' if method else ''}{kind} {mult}배"
+        return f"{mult}배 ({kind})"
     return None
 
 def extract_payment_date(t):
@@ -956,8 +953,6 @@ DASH_TEMPLATE = """<!DOCTYPE html>
 <body><div class="wrap">
   <h1>IPO 시장 동향</h1>
   <div class="asof" id="asof"></div>
-  <div style="margin:2px 0 12px"><a href="IPO_Rawdata_master.xlsx" download
-     style="display:inline-block;padding:6px 12px;background:#eef2ff;color:#3a4a7a;border:1px solid #c7d2fe;border-radius:6px;font-size:13px;text-decoration:none;font-weight:600">⬇ RAW 통합집계 다운로드 (코스닥·유가·리그24·25·26 원장)</a></div>
   <div class="tabs">
     <button data-t="t1" class="active">예심</button>
     <button data-t="t2">공모 · 상장</button>
@@ -1093,7 +1088,7 @@ function renderT1(){
 }
 
 /* ── 탭2 공모·상장 ── */
-const LISTED = [["기업명","기업명"],["상장일","상장일"],["밴드","공모가밴드(원)"],
+const LISTED = [["기업명","기업명"],["상장트랙","트랙"],["상장일","상장일"],["밴드","공모가밴드(원)"],
   ["확정공모가","확정공모가(원)"],
   ["공모주식수","공모주식수(주)",1],["공모금액","공모금액(백만원)",1],
   ["수요예측경쟁률","수요예측경쟁률"],["참여기관수","수요예측 참여기관수",1],
@@ -1162,7 +1157,9 @@ function unlockSecret(){
   h+='<div class="sec">1. 공모금액(인수금액) 순위</div>'+tbl(amtRows, RANK_AMT);
   h+='<div class="sec">2. 인수수수료 순위</div>'+tbl(rank('인수수수료'), RANK_FEE);
   h+='<div class="sec">3. 상장 건수 순위</div>'+tbl(rank('건수'), RANK_CNT);
-  h+='<button class="btn-dl" id="dlLedger" style="margin-top:14px;margin-left:0">⬇ raw 원장 다운로드</button>';
+  h+='<div class="sec">4. RAW 통합집계 원본</div>';
+  h+='<a href="IPO_Rawdata_master.xlsx" download class="btn-dl" style="display:inline-block;margin-right:8px;text-decoration:none">⬇ RAW 통합집계 (코스닥·유가·리그24·25·26)</a>';
+  h+='<button class="btn-dl" id="dlLedger" style="margin-left:0">⬇ 트랙레코드 원장</button>';
   box.innerHTML=h;
   var dl=document.getElementById('dlLedger'); if(dl) dl.onclick=downloadLedger;
 }
@@ -1232,7 +1229,7 @@ def build_dashboard(kind_data, web, kind_master=None):
         return f"{y}-{mo:02d}-{d1:02d}~{d2:02d}"                        # 같은 월이면 MM-DD~DD
 
     listed = [{
-        "기업명": x.get("기업명",""), "상장일": x.get("상장일",""),
+        "기업명": x.get("기업명",""), "상장트랙": x.get("상장트랙",""), "상장일": x.get("상장일",""),
         "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
         "공모금액": x.get("공모금액",""), "멀티플": x.get("멀티플",""),
         "확정공모가": _comma(x.get("확정공모가","")), "참여기관수": x.get("참여기관수",""),
