@@ -2,7 +2,8 @@ name: 1) IPO 일일 자동화
 
 on:
   schedule:
-    - cron: "30 9 * * *"
+    - cron: "23 9 * * *"    # 18:23 KST (off-peak 분 · 정각/30분은 GitHub가 자주 건너뜀)
+    - cron: "23 12 * * *"   # 21:23 KST 백업 (앞 실행이 스킵돼도 재시도)
   workflow_dispatch:
 
 permissions:
