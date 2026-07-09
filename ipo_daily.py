@@ -224,13 +224,14 @@ def extract_registration(text):
     m = re.search(r"(비교회사|유사회사|적용)\s*(P/?E R?|PER|PSR|EV/EBITDA)[^\d]{0,30}([\d.]+)\s*배?", t, re.I)
     if m: out["멀티플"] = f"{m.group(3)} ({m.group(2).upper().replace(' ','')})"
 
-    m = re.search(r"수요예측\s*일시\s*\|?\s*(\d{4}년\s*\d{2}월\s*\d{2}일)[^\n]{0,40}?[~∼][^\n]{0,10}?(\d{4}년\s*\d{2}월\s*\d{2}일)", t)
+    m = re.search(r"수요예측\s*일시?\s*\|?\s*(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})"
+                  r"[일)월화수목금토(\s]*[~∼]\s*(?:(\d{4})[.\s년]+)?(\d{1,2})[.\s월]+(\d{1,2})", t)
     if m:
-        f = lambda s: re.sub(r"(\d{4})년\s*(\d{2})월\s*(\d{2})일", r"\2-\3", s)
-        out["수요예측기간"] = f"{f(m.group(1))}~{f(m.group(2))}"
+        out["수요예측기간"] = f"{int(m.group(2)):02d}-{int(m.group(3)):02d}~{int(m.group(5)):02d}-{int(m.group(6)):02d}"
 
-    m = re.search(r"청약[기일]{0,2}일?\s*\|?\s*(\d{4})[.\s년]+(\d{2})[.\s월]+(\d{2})[^\n]{0,30}[~∼][^\n]{0,20}?(\d{2})[.\s월]+(\d{2})", t)
-    if m: out["청약일정"] = f"{m.group(2)}-{m.group(3)}~{m.group(4)}-{m.group(5)}"
+    m = re.search(r"청약기[일간][\s\S]{0,160}?(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})"
+                  r"[일)월화수목금토(\s]*[~∼]\s*(?:(\d{4})[.\s년]+)?(\d{1,2})[.\s월]+(\d{1,2})", t)
+    if m: out["청약일정"] = f"{int(m.group(2)):02d}-{int(m.group(3)):02d}~{int(m.group(5)):02d}-{int(m.group(6)):02d}"
 
     # 확정본 전용
     m = re.search(r"확정공모가액[^\d]{0,20}([\d,]+)\s*원", t)
@@ -1117,8 +1118,10 @@ function renderT2(){
 const MONTH = [["월","월"],["청구","청구",1],["승인","승인",1],
   ["철회","철회·미승인",1],["상장","상장",1],["승인율","예심 승인율"]];
 const KV = [["항목","항목"],["값","값"]];
+const YO = [["월","월"],["기업수","기업수",1],["경쟁률평균","수요예측 경쟁률(평균)"],["참여평균","참여기관수(평균)",1]];
+const CY = [["월","월"],["기업수","청약 기업수",1],["경쟁률평균","청약 경쟁률(평균)"]];
 const RANK_AMT = [["순위","순위",1],["증권사","증권사"],["건수","건수",1],["인수금액","인수금액(억)",1],["점유율","점유율"]];
-const RANK_FEE = [["순위","순위",1],["증권사","증권사"],["인수수수료","인수수수료(억)",1],["청약수수료","청약수수료(억)",1],["전체수수료","전체수수료(억)",1]];
+const RANK_FEE = [["순위","순위",1],["증권사","증권사"],["건수","건수",1],["인수수수료","인수수수료(억)",1]];
 const RANK_CNT = [["순위","순위",1],["증권사","증권사"],["건수","상장건수",1]];
 function renderT3(){
   const from = val('t3from'), to = val('t3to');
@@ -1135,12 +1138,11 @@ function renderT3(){
             승인율: tden ? (tot.승인/tden*100).toFixed(1)+'%' : '-', 합계:true}]);
   let h = '<div class="sec">① 월별 예심 · 상장 현황 및 승인율</div>';
   h += tbl(disp, MONTH, {totalKey:"합계"});
-  var y = D.yoyeuk||{}, c = D.cheongyak||{};
-  h += '<div class="sec">② 수요예측 현황 <span class="cnt">(상장완료 · 수집분 기준)</span></div>';
-  h += tbl([{항목:'대상 기업수', 값:(y.대상수||0)+'건'},{항목:'참여기관수 평균', 값:y.참여평균||'-'},{항목:'경쟁률 평균', 값:y.경쟁률평균||'-'}], KV);
-  h += '<div class="sec">③ 청약 현황 <span class="cnt">(상장완료 · 수집분 기준)</span></div>';
-  h += tbl([{항목:'대상 기업수', 값:(c.대상수||0)+'건'},{항목:'청약경쟁률 평균', 값:c.경쟁률평균||'-'}], KV);
-  h += '<div class="sec">④ 주관사 트랙레코드 <span class="cnt">(비밀번호 필요)</span></div>';
+  h += '<div class="sec">② 수요예측 현황 <span class="cnt">(상장 월별 평균 · 수집분 기준)</span></div>';
+  h += tbl(D.yoyeuk||[], YO, {totalKey:"합계"});
+  h += '<div class="sec">③ 청약 현황 <span class="cnt">(상장 월별 평균)</span></div>';
+  h += tbl(D.cheongyak||[], CY, {totalKey:"합계"});
+  h += '<div class="sec">④ 추가 분석 데이터 <span class="cnt">(비밀번호 필요)</span></div>';
   h += '<div class="ctrl"><label>비밀번호</label><input type="password" id="t3pw" class="dt" style="width:130px" autocomplete="off"><button class="preset" id="t3unlock">확인</button></div>';
   h += '<div id="t3secret"></div>';
   document.getElementById('t3body').innerHTML = h;
@@ -1156,9 +1158,9 @@ function unlockSecret(){
   function rank(key){ return L.slice().sort(function(a,b){return (b[key]||0)-(a[key]||0);}).map(function(r,i){ return Object.assign({순위:i+1}, r); }); }
   var totAmt=L.reduce(function(s,r){return s+(r.인수금액||0);},0);
   var amtRows=rank('인수금액').map(function(r){ return Object.assign({}, r, {점유율:(totAmt?(r.인수금액/totAmt*100):0).toFixed(1)+'%'}); });
-  var h='<div class="note">FY26 트랙레코드 · 리그 검증 · 누적 · 단위 억원 · 스팩·리츠 포함 · 청약수수료=기관배정액 1% 추정</div>';
+  var h='<div class="note">FY26 · 납입일 기준 누적 · 리그 검증 · 단위 억원 · 스팩·리츠 포함</div>';
   h+='<div class="sec">1. 공모금액(인수금액) 순위</div>'+tbl(amtRows, RANK_AMT);
-  h+='<div class="sec">2. 수수료 순위 (인수 / 청약 / 전체)</div>'+tbl(rank('전체수수료'), RANK_FEE);
+  h+='<div class="sec">2. 인수수수료 순위</div>'+tbl(rank('인수수수료'), RANK_FEE);
   h+='<div class="sec">3. 상장 건수 순위</div>'+tbl(rank('건수'), RANK_CNT);
   h+='<button class="btn-dl" id="dlLedger" style="margin-top:14px;margin-left:0">⬇ raw 원장 다운로드</button>';
   box.innerHTML=h;
@@ -1245,20 +1247,40 @@ def build_dashboard(kind_data, web):
     share = [{"대표주관사": s["대표주관사"], "건수": s["건수"],
               "공모금액": f'{s["공모금액"]:,.0f}' if s["공모금액"] else ""} for s in web["share"]]
 
-    # 수요예측·청약 요약 (상장완료 중 수집된 값 기준)
+    # 수요예측·청약 현황 (상장 월별 평균 + 누적/합계 · 수집분 기준)
     def _f(v):
         try: return float(str(v).replace(",", "").replace(":1", ""))
         except Exception: return None
-    yo_c, yo_i, cy = [], [], []
+    def _avg(a): return (sum(a) / len(a)) if a else None
+    yo_m, cy_m = {}, {}
     for x in listed:
-        v = _f(x.get("수요예측경쟁률"));  v is not None and yo_c.append(v)
-        iv = _f(x.get("참여기관수"));      iv is not None and yo_i.append(iv)
-        cv = _f(x.get("청약경쟁률"));      cv is not None and cy.append(cv)
-    yoyeuk = {"대상수": len(yo_c),
-              "참여평균": f"{sum(yo_i)/len(yo_i):,.0f}" if yo_i else "-",
-              "경쟁률평균": f"{sum(yo_c)/len(yo_c):,.1f}:1" if yo_c else "-"}
-    cheongyak = {"대상수": len(cy),
-                 "경쟁률평균": f"{sum(cy)/len(cy):,.1f}:1" if cy else "-"}
+        d = (x.get("상장일") or "")
+        mo = d[:7] if len(d) >= 7 else ""
+        if not mo: continue
+        v = _f(x.get("수요예측경쟁률")); iv = _f(x.get("참여기관수"))
+        if v is not None:
+            yo_m.setdefault(mo, {"c": [], "i": []})
+            yo_m[mo]["c"].append(v)
+            if iv is not None: yo_m[mo]["i"].append(iv)
+        cv = _f(x.get("청약경쟁률"))
+        if cv is not None:
+            cy_m.setdefault(mo, []).append(cv)
+    yoyeuk, allc, alli = [], [], []
+    for mo in sorted(yo_m):
+        c, i = yo_m[mo]["c"], yo_m[mo]["i"]; allc += c; alli += i
+        yoyeuk.append({"월": mo, "기업수": len(c),
+            "경쟁률평균": f"{_avg(c):,.1f}:1" if c else "-",
+            "참여평균": f"{_avg(i):,.0f}" if i else "-"})
+    yoyeuk.append({"월": "누적", "기업수": len(allc),
+        "경쟁률평균": f"{_avg(allc):,.1f}:1" if allc else "-",
+        "참여평균": f"{_avg(alli):,.0f}" if alli else "-", "합계": True})
+    cheongyak, allcy = [], []
+    for mo in sorted(cy_m):
+        v = cy_m[mo]; allcy += v
+        cheongyak.append({"월": mo, "기업수": len(v),
+            "경쟁률평균": f"{_avg(v):,.1f}:1" if v else "-"})
+    cheongyak.append({"월": "합계", "기업수": len(allcy),
+        "경쟁률평균": f"{_avg(allcy):,.1f}:1" if allcy else "-", "합계": True})
 
     # 주관사 트랙레코드 원장 (리그 검증 정본)
     league, ledger = [], []
