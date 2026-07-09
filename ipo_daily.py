@@ -267,6 +267,183 @@ def extract_performance(text):
     return out
 
 
+# ── 강건 발췌기 v2 (검증: 상장완료 12딜 · 인수인 4딜 실측 일치) ──────────
+_FIRM_ABBR = [("미래에셋","미래"),("한국투자","한국"),("엔에이치","NH"),("NH투자","NH"),
+    ("케이비","KB"),("KB","KB"),("삼성","삼성"),("신한투자","신한"),("대신","대신"),
+    ("하나","하나"),("키움","키움"),("유진투자","유진"),("메리츠","메리츠"),
+    ("교보","교보"),("현대차","현대차"),("유안타","유안타"),("IBK","IBK"),("BNK","BNK")]
+def _abbr_firm(name):
+    for k, v in _FIRM_ABBR:
+        if k in name: return v
+    return re.sub(r"투자증권|증권", "", name or "").strip()
+_ROLE_MAP = {"공동대표주관회사":"공동대표","대표주관회사":"대표","대표":"대표",
+    "공동주관회사":"공동주관","인수회사":"인수단","인수단":"인수단"}
+
+def extract_demand(t):
+    """수요예측 총경쟁률·참여건수(수요예측 참여내역 표 합계 열)"""
+    out = {}; best = None
+    for m in re.finditer(r"경쟁률[^\n]{0,8}?\|([^\n]+)", t):
+        vals = []
+        for x in re.findall(r"[\d,]+\.\d+|[\d,]+", m.group(1)):
+            try: vals.append(float(x.replace(",", "")))
+            except Exception: pass
+        if len(vals) >= 6 and (best is None or vals[-1] > best[0]):
+            best = (vals[-1], m.start())
+    if best:
+        out["수요예측경쟁률"] = round(best[0], 2)
+        pre = t[max(0, best[1]-1600):best[1]]; cm = None
+        for m in re.finditer(r"건수\s*\|([^\n]+)", pre): cm = m
+        if cm:
+            cn = re.findall(r"[\d,]+", cm.group(1))
+            if cn: out["참여기관수"] = int(cn[-1].replace(",", ""))
+    return out
+
+def extract_multiple(t):
+    """공모가 산정 요약표: 평가방법 · 평가모형(PER/PBR/EV·EBITDA) 배수"""
+    method = None
+    m = re.search(r"평가방법\s*\|\s*([가-힣]+)", t)
+    if m: method = m.group(1)
+    m = re.search(r"②[^\n]{0,4}\|?\s*(?:유사기업|유사회사|비교회사|비교기업|비교대상회사|비교대상기업)"
+                  r"\s*(?:평균\s*)?(PER|PBR|EV\s*/?\s*EBITDA)\s*\|?\s*(?:배\s*\|?\s*)?([\d,]+\.?\d*)", t)
+    if not m:
+        m = re.search(r"(?:유사기업|유사회사|비교회사|비교기업|비교대상회사|비교대상기업)"
+                      r"\s*(?:평균\s*)?(PER|PBR|EV\s*/?\s*EBITDA)\s*\|?\s*(?:배\s*\|?\s*)?([\d,]+\.?\d*)\s*(?:배|x|X)", t)
+    if m:
+        kind = re.sub(r"\s", "", m.group(1)); mult = m.group(2)
+        return f"{method + ' · ' if method else ''}{kind} {mult}배"
+    return None
+
+def extract_payment_date(t):
+    """공모개요 납입기일 (청약기일 다음 마지막 일자)"""
+    seg = re.search(r"납\s*입\s*기\s*일[\s\S]{0,260}", t)
+    if not seg: return None
+    ds = re.findall(r"(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})", seg.group(0))
+    if ds:
+        y, mo, da = ds[-1]
+        return f"{y}-{int(mo):02d}-{int(da):02d}"
+    return None
+
+def extract_perf_fee(t):
+    """성과수수료 조항 발췌(요약)"""
+    m = re.search(r"([^.。\n]{0,70}?([\d.]+)\s*%[^.。\n]{0,45}?성과수수료[^.。\n]{0,70})", t)
+    if m: return re.sub(r"\s+", " ", m.group(1)).strip()[:140]
+    m = re.search(r"(성과수수료[^.。\n]{0,140})", t)
+    if m: return re.sub(r"\s+", " ", m.group(1)).strip()[:140]
+    return "없음"
+
+def extract_underwriters(t):
+    """인수인 표 → [{증권사,역할,인수금액(억),인수대가(억)}] · 증권사별 정정후(마지막) 유지"""
+    rows = []
+    for m in re.finditer(
+        r"(공동대표주관회사|대표주관회사|공동주관회사|인수회사|인수단|대표)\s*\|\s*"
+        r"([가-힣A-Za-z]+증권)\s*\|\s*기명식[^|]*\|\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|\s*총액인수", t):
+        role, firm, qty, amt, fee = m.groups()
+        rows.append({"증권사": _abbr_firm(firm), "역할": _ROLE_MAP.get(role, role),
+            "인수금액": round(int(amt.replace(",", "")) / 1e8, 2),
+            "인수대가": round(int(fee.replace(",", "")) / 1e8, 3)})
+    last = {}
+    for r in rows: last[r["증권사"]] = r   # 정정 전/후 중복 → 마지막(확정) 유지
+    return list(last.values())
+
+
+def enrich_listed_from_dart(listings, corp_map):
+    """신규/미백필 상장딜 → 발행조건확정 신고서 자동 발췌 → listing_seed.json 갱신
+       + 인수인 표 → underwriter_ledger.json 자동 확장(납입일 기준 누적).
+       DART 키 없으면 조용히 통과. 절대 파이프라인을 중단시키지 않음."""
+    if not DART_API_KEY:
+        print("[ENRICH] DART 키 없음 → 신고서 자동발췌 생략"); return
+    seed_path = os.path.join(BASE, "listing_seed.json")
+    seed = {x["기업명"]: x for x in _load_listing_seed()}
+    changed = 0
+    for l in listings:
+        nm = l["회사명"]
+        ty = (l.get("상장유형") or "")
+        if "합병" in ty:            # 스팩합병 상장은 공모개념 없음
+            continue
+        rec = seed.get(nm)
+        if rec is None:
+            rec = {"기업명": nm, "진행상태": "상장완료"}; seed[nm] = rec
+        # 이미 백필된 딜은 건너뜀(수동검증 우선)
+        if str(rec.get("수요예측경쟁률") or "") not in ("", "수집예정"):
+            continue
+        code = corp_map.get(nm)
+        if not code:
+            continue
+        try:
+            reg, perf, status = latest_filing(dart_list(code))
+            if not reg:
+                continue
+            text = dart_document_text(reg["rcept_no"])
+        except Exception as e:
+            print(f"  [ENRICH 경고] {nm}: {e}"); continue
+        info = extract_registration(text)          # 밴드·확정가·대표주관 등
+        info.update(extract_demand(text))          # 수요예측경쟁률·참여기관수
+        pay = extract_payment_date(text)
+        if pay: info["납입일"] = pay
+        mult = extract_multiple(text)
+        if mult: info["멀티플"] = mult
+        fee = extract_perf_fee(text)
+        if fee and fee != "없음": info["성과수수료"] = fee
+        for k, v in info.items():
+            if v not in (None, "", "수집예정"):
+                rec[k] = v
+        rec["_자동발췌"] = f"{status}·{reg['rcept_no']}"
+        changed += 1
+        print(f"  [ENRICH] {nm}: 수요예측 {info.get('수요예측경쟁률')} · "
+              f"멀티플 {info.get('멀티플')} · 납입 {info.get('납입일')}")
+        # 인수인 → 원장 자동 확장
+        try:
+            _extend_ledger(nm, l, extract_underwriters(text))
+        except Exception as e:
+            print(f"  [ENRICH 원장경고] {nm}: {e}")
+    if changed:
+        json.dump(list(seed.values()), open(seed_path, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+        print(f"[ENRICH] listing_seed.json 자동갱신 {changed}건")
+
+
+def _extend_ledger(company, listing, underwriters):
+    """인수인 표를 underwriter_ledger.json 딜원장에 추가하고 집계 재계산.
+       청약수수료=기관배정액(75% 가정)×1%(스팩 제외) · 인수수수료=인수대가."""
+    lp = os.path.join(BASE, "underwriter_ledger.json")
+    if not (os.path.exists(lp) and underwriters):
+        return
+    L = json.load(open(lp, encoding="utf-8"))
+    dl = L.setdefault("딜원장", [])
+    if any(d.get("업체") == company for d in dl):
+        return
+    is_spac = bool(re.search(r"스팩|스펙|기업인수목적", company))
+    total = round(sum(u["인수금액"] for u in underwriters), 2)
+    ui = []
+    for u in underwriters:
+        share = (u["인수금액"] / total) if total else 0
+        chung = 0.0 if is_spac else round(total * 0.75 * 0.01 * share, 3)
+        ui.append({"증권사": u["증권사"], "역할": u["역할"],
+                   "인수금액": u["인수금액"], "인수수수료": u["인수대가"],
+                   "청약수수료": chung, "전체수수료": round(u["인수대가"] + chung, 3)})
+    dl.append({"업체": company, "상장일": listing.get("상장일", ""),
+               "시장": listing.get("시장", "코스닥"), "발행금액": total, "인수인": ui})
+    # 집계 재계산
+    agg = {}
+    for d in dl:
+        for u in d["인수인"]:
+            a = agg.setdefault(u["증권사"], {"증권사": u["증권사"], "인수금액": 0.0,
+                "인수수수료": 0.0, "청약수수료": 0.0, "전체수수료": 0.0, "건수": 0})
+            a["인수금액"] += u.get("인수금액", 0) or 0
+            a["인수수수료"] += u.get("인수수수료", 0) or 0
+            a["청약수수료"] += u.get("청약수수료", 0) or 0
+            a["전체수수료"] += u.get("전체수수료", 0) or 0
+        for u in d["인수인"]:
+            if u["역할"] in ("대표", "공동대표"):
+                agg[u["증권사"]]["건수"] += 1
+    for a in agg.values():
+        for k in ("인수금액", "인수수수료", "청약수수료", "전체수수료"):
+            a[k] = round(a[k], 3)
+    L["주관사집계"] = sorted(agg.values(), key=lambda r: -r["전체수수료"])
+    json.dump(L, open(lp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print(f"  [원장] {company} 추가 → 딜 {len(dl)}건")
+
+
 def track_offerings(approved_names):
     """승인법인 → corp_code → 최신 신고서 → 발췌 → offering_master 갱신"""
     master = {}
@@ -936,10 +1113,13 @@ function renderT2(){
   document.getElementById('t2body').innerHTML = h;
 }
 
-/* ── 탭3 분석 ── */
+/* ── 탭3 분석 (일반 + 비밀) ── */
 const MONTH = [["월","월"],["청구","청구",1],["승인","승인",1],
   ["철회","철회·미승인",1],["상장","상장",1],["승인율","예심 승인율"]];
-const SHARE = [["대표주관사","대표주관사"],["건수","건수",1],["공모금액","공모금액(백만원)",1]];
+const KV = [["항목","항목"],["값","값"]];
+const RANK_AMT = [["순위","순위",1],["증권사","증권사"],["건수","건수",1],["인수금액","인수금액(억)",1],["점유율","점유율"]];
+const RANK_FEE = [["순위","순위",1],["증권사","증권사"],["인수수수료","인수수수료(억)",1],["청약수수료","청약수수료(억)",1],["전체수수료","전체수수료(억)",1]];
+const RANK_CNT = [["순위","순위",1],["증권사","증권사"],["건수","상장건수",1]];
 function renderT3(){
   const from = val('t3from'), to = val('t3to');
   const src = D.monthly.filter(m => monthInRange(m['월'], from, to));
@@ -955,10 +1135,45 @@ function renderT3(){
             승인율: tden ? (tot.승인/tden*100).toFixed(1)+'%' : '-', 합계:true}]);
   let h = '<div class="sec">① 월별 예심 · 상장 현황 및 승인율</div>';
   h += tbl(disp, MONTH, {totalKey:"합계"});
-  h += '<div class="sec">② 주관사별 점유율 (공모 확보분) <span class="cnt">(전체 기간)</span></div>';
-  h += tbl(D.share, SHARE);
+  var y = D.yoyeuk||{}, c = D.cheongyak||{};
+  h += '<div class="sec">② 수요예측 현황 <span class="cnt">(상장완료 · 수집분 기준)</span></div>';
+  h += tbl([{항목:'대상 기업수', 값:(y.대상수||0)+'건'},{항목:'참여기관수 평균', 값:y.참여평균||'-'},{항목:'경쟁률 평균', 값:y.경쟁률평균||'-'}], KV);
+  h += '<div class="sec">③ 청약 현황 <span class="cnt">(상장완료 · 수집분 기준)</span></div>';
+  h += tbl([{항목:'대상 기업수', 값:(c.대상수||0)+'건'},{항목:'청약경쟁률 평균', 값:c.경쟁률평균||'-'}], KV);
+  h += '<div class="sec">④ 주관사 트랙레코드 <span class="cnt">(비밀번호 필요)</span></div>';
+  h += '<div class="ctrl"><label>비밀번호</label><input type="password" id="t3pw" class="dt" style="width:130px" autocomplete="off"><button class="preset" id="t3unlock">확인</button></div>';
+  h += '<div id="t3secret"></div>';
   document.getElementById('t3body').innerHTML = h;
-  EXPORT.t3 = {sheets:[{name:'월별현황', cols:MONTH, rows:disp}, {name:'주관사점유율', cols:SHARE, rows:D.share}], fname:'분석_'+stamp(from,to)+'.xlsx'};
+  var ub=document.getElementById('t3unlock'); if(ub) ub.onclick=unlockSecret;
+  var pw=document.getElementById('t3pw'); if(pw) pw.addEventListener('keydown',function(e){ if(e.key==='Enter') unlockSecret(); });
+  EXPORT.t3 = {sheets:[{name:'월별현황', cols:MONTH, rows:disp}], fname:'분석_'+stamp(from,to)+'.xlsx'};
+}
+function unlockSecret(){
+  var box=document.getElementById('t3secret');
+  var pw=(document.getElementById('t3pw')||{}).value||'';
+  if(pw!=='1111*'){ box.innerHTML='<div class="note" style="color:var(--red)">비밀번호가 올바르지 않습니다.</div>'; return; }
+  var L=(D.league||[]).slice();
+  function rank(key){ return L.slice().sort(function(a,b){return (b[key]||0)-(a[key]||0);}).map(function(r,i){ return Object.assign({순위:i+1}, r); }); }
+  var totAmt=L.reduce(function(s,r){return s+(r.인수금액||0);},0);
+  var amtRows=rank('인수금액').map(function(r){ return Object.assign({}, r, {점유율:(totAmt?(r.인수금액/totAmt*100):0).toFixed(1)+'%'}); });
+  var h='<div class="note">FY26 트랙레코드 · 리그 검증 · 누적 · 단위 억원 · 스팩·리츠 포함 · 청약수수료=기관배정액 1% 추정</div>';
+  h+='<div class="sec">1. 공모금액(인수금액) 순위</div>'+tbl(amtRows, RANK_AMT);
+  h+='<div class="sec">2. 수수료 순위 (인수 / 청약 / 전체)</div>'+tbl(rank('전체수수료'), RANK_FEE);
+  h+='<div class="sec">3. 상장 건수 순위</div>'+tbl(rank('건수'), RANK_CNT);
+  h+='<button class="btn-dl" id="dlLedger" style="margin-top:14px;margin-left:0">⬇ raw 원장 다운로드</button>';
+  box.innerHTML=h;
+  var dl=document.getElementById('dlLedger'); if(dl) dl.onclick=downloadLedger;
+}
+function downloadLedger(){
+  if(typeof XLSX==='undefined') return;
+  var rows=[["업체","상장일","시장","증권사","역할","인수금액(억)","인수수수료(억)","청약수수료(억)","전체수수료(억)"]];
+  (D.ledger||[]).forEach(function(d){ (d.인수인||[]).forEach(function(u){ rows.push([d.업체,d.상장일,d.시장,u.증권사,u.역할,u.인수금액,u.인수수수료,u.청약수수료,u.전체수수료]); }); });
+  var ag=[["증권사","건수","인수금액(억)","인수수수료(억)","청약수수료(억)","전체수수료(억)"]];
+  (D.league||[]).forEach(function(r){ ag.push([r.증권사,r.건수,r.인수금액,r.인수수수료,r.청약수수료,r.전체수수료]); });
+  var wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "딜원장");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ag), "주관사집계");
+  XLSX.writeFile(wb, "IPO_트랙레코드_원장.xlsx");
 }
 
 document.querySelectorAll('.tabs button').forEach(b=>{
@@ -1030,9 +1245,35 @@ def build_dashboard(kind_data, web):
     share = [{"대표주관사": s["대표주관사"], "건수": s["건수"],
               "공모금액": f'{s["공모금액"]:,.0f}' if s["공모금액"] else ""} for s in web["share"]]
 
+    # 수요예측·청약 요약 (상장완료 중 수집된 값 기준)
+    def _f(v):
+        try: return float(str(v).replace(",", "").replace(":1", ""))
+        except Exception: return None
+    yo_c, yo_i, cy = [], [], []
+    for x in listed:
+        v = _f(x.get("수요예측경쟁률"));  v is not None and yo_c.append(v)
+        iv = _f(x.get("참여기관수"));      iv is not None and yo_i.append(iv)
+        cv = _f(x.get("청약경쟁률"));      cv is not None and cy.append(cv)
+    yoyeuk = {"대상수": len(yo_c),
+              "참여평균": f"{sum(yo_i)/len(yo_i):,.0f}" if yo_i else "-",
+              "경쟁률평균": f"{sum(yo_c)/len(yo_c):,.1f}:1" if yo_c else "-"}
+    cheongyak = {"대상수": len(cy),
+                 "경쟁률평균": f"{sum(cy)/len(cy):,.1f}:1" if cy else "-"}
+
+    # 주관사 트랙레코드 원장 (리그 검증 정본)
+    league, ledger = [], []
+    lp = os.path.join(BASE, "underwriter_ledger.json")
+    if os.path.exists(lp):
+        try:
+            LJ = json.load(open(lp, encoding="utf-8"))
+            league = LJ.get("주관사집계", []); ledger = LJ.get("딜원장", [])
+        except Exception as e:
+            print(f"  [경고] 원장 로드 실패: {e}")
+
     DATA = {"asof": kind_data["asof"], "year": kind_data["year"],
             "screening": {k: scr(v) for k, v in kind_data["tables"].items()},
-            "listed": listed, "prog": prog, "monthly": monthly, "share": share}
+            "listed": listed, "prog": prog, "monthly": monthly, "share": share,
+            "yoyeuk": yoyeuk, "cheongyak": cheongyak, "league": league, "ledger": ledger}
     html = DASH_TEMPLATE.replace("__DATA__", json.dumps(DATA, ensure_ascii=False))
     with open(os.path.join(BASE, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
@@ -1165,6 +1406,17 @@ def main():
         offering, ch = track_offerings(approved)
         print(f"[DART] 공모 추적: {len(offering)}건 · 변경 {len(ch)}건")
         for c in ch: print("   -", c)
+
+    # [3-c] 신규 상장딜 신고서 자동발췌 → listing_seed.json · underwriter_ledger.json 갱신
+    corp_map = dict(CORP_SEED)
+    _cm = os.path.join(BASE, "corp_map.json")
+    if os.path.exists(_cm):
+        try: corp_map.update(json.load(open(_cm, encoding="utf-8")).get("corp_map", {}))
+        except Exception: pass
+    try:
+        enrich_listed_from_dart(listings, corp_map)
+    except Exception as e:
+        print(f"[ENRICH] 실패(무시): {e}")
 
     # [4] 3탭 엑셀
     web = build_excel(kind_data, kind_master, offering, listings)
