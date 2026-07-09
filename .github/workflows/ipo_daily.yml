@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: setup-python
         uses: actions/setup-python@v5
@@ -34,12 +36,22 @@ jobs:
 
       - name: commit outputs
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
             echo "no changes"
-          else
-            git commit -m "chore: update IPO data"
-            git push
+            exit 0
           fi
+          git commit -m "chore: update IPO data $(date -u +%Y-%m-%d)"
+          for i in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "pushed on attempt $i"
+              exit 0
+            fi
+            echo "push rejected, syncing with remote (attempt $i)..."
+            git pull --rebase --autostash origin main || git rebase --abort || true
+            sleep 4
+          done
+          echo "push failed after retries" >&2
+          exit 1
