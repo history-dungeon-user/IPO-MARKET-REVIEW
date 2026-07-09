@@ -469,11 +469,19 @@ def track_offerings(approved_names):
             print(f"  [경고] {name} DART 조회 실패: {e}"); continue
         reg, perf, status = latest_filing(filings)
         new_rcept = reg["rcept_no"] if reg else None
-        if new_rcept and rec.get("최신접수번호") != new_rcept:
+        if new_rcept:                      # 매번 최신 신고서 재파싱(개선 파서 적용)
             try:
                 text = dart_document_text(new_rcept)
                 rec.update(extract_registration(text))
-                changes.append(f"{name}: 신고서 갱신({status}) {new_rcept}")
+                rec.update(extract_demand(text))       # 수요예측경쟁률·참여기관수
+                pay = extract_payment_date(text)
+                if pay: rec["납입일"] = pay
+                mult = extract_multiple(text)
+                if mult: rec["멀티플"] = mult
+                fee = extract_perf_fee(text)
+                if fee and fee != "없음": rec["성과수수료"] = fee
+                if rec.get("최신접수번호") != new_rcept:
+                    changes.append(f"{name}: 신고서 갱신({status}) {new_rcept}")
             except Exception as e:
                 print(f"  [경고] {name} 발췌 실패: {e}")
             rec["최신접수번호"] = new_rcept
@@ -948,6 +956,8 @@ DASH_TEMPLATE = """<!DOCTYPE html>
 <body><div class="wrap">
   <h1>IPO 시장 동향</h1>
   <div class="asof" id="asof"></div>
+  <div style="margin:2px 0 12px"><a href="IPO_Rawdata_master.xlsx" download
+     style="display:inline-block;padding:6px 12px;background:#eef2ff;color:#3a4a7a;border:1px solid #c7d2fe;border-radius:6px;font-size:13px;text-decoration:none;font-weight:600">⬇ RAW 통합집계 다운로드 (코스닥·유가·리그24·25·26 원장)</a></div>
   <div class="tabs">
     <button data-t="t1" class="active">예심</button>
     <button data-t="t2">공모 · 상장</button>
