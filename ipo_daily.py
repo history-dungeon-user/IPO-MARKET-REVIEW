@@ -1118,37 +1118,26 @@ function renderT2(){
 const MONTH = [["월","월"],["청구","청구",1],["승인","승인",1],
   ["철회","철회·미승인",1],["상장","상장",1],["승인율","예심 승인율"]];
 const KV = [["항목","항목"],["값","값"]];
-const YO = [["월","월"],["기업수","기업수",1],["경쟁률평균","수요예측 경쟁률(평균)"],["참여평균","참여기관수(평균)",1]];
-const CY = [["월","월"],["기업수","청약 기업수",1],["경쟁률평균","청약 경쟁률(평균)"]];
+const T1 = [["연도","구분"],["월","월"],["기업수","기업수",1]];
+const T2 = [["연도","구분"],["월","월"],["총승인","총 승인기업",1],["스팩제외승인","(스팩제외) 승인",1],["철회미승인","철회/미승인",1],["승인율","승인율"],["스팩제외승인율","(스팩제외) 승인율"]];
+const T3 = [["연도","구분"],["월","월"],["참여평균","참여기관수 평균",1],["수요예측평균","수요예측경쟁률 평균"],["청약평균","청약경쟁률 평균"]];
 const RANK_AMT = [["순위","순위",1],["증권사","증권사"],["건수","건수",1],["인수금액","인수금액(억)",1],["점유율","점유율"]];
 const RANK_FEE = [["순위","순위",1],["증권사","증권사"],["건수","건수",1],["인수수수료","인수수수료(억)",1]];
 const RANK_CNT = [["순위","순위",1],["증권사","증권사"],["건수","상장건수",1]];
 function renderT3(){
-  const from = val('t3from'), to = val('t3to');
-  const src = D.monthly.filter(m => monthInRange(m['월'], from, to));
-  const tot = {청구:0, 승인:0, 철회:0, 상장:0};
-  const rows = src.map(function(m){
-    tot.청구+=m.청구; tot.승인+=m.승인; tot.철회+=m.철회; tot.상장+=m.상장;
-    var den = m.승인 + m.철회;
-    return {월:m.월, 청구:m.청구, 승인:m.승인, 철회:m.철회, 상장:m.상장,
-            승인율: den ? (m.승인/den*100).toFixed(1)+'%' : '-'};
-  });
-  var tden = tot.승인 + tot.철회;
-  const disp = rows.concat([{월:'합계', 청구:tot.청구, 승인:tot.승인, 철회:tot.철회, 상장:tot.상장,
-            승인율: tden ? (tot.승인/tden*100).toFixed(1)+'%' : '-', 합계:true}]);
-  let h = '<div class="sec">① 월별 예심 · 상장 현황 및 승인율</div>';
-  h += tbl(disp, MONTH, {totalKey:"합계"});
-  h += '<div class="sec">② 수요예측 현황 <span class="cnt">(상장 월별 평균 · 수집분 기준)</span></div>';
-  h += tbl(D.yoyeuk||[], YO, {totalKey:"합계"});
-  h += '<div class="sec">③ 청약 현황 <span class="cnt">(상장 월별 평균)</span></div>';
-  h += tbl(D.cheongyak||[], CY, {totalKey:"합계"});
+  let h = '<div class="sec">① 월별 상장기업 추이 <span class="cnt">(24·25년 코스닥+유가 시트 상장일 · 26년 상장완료 · 상장월 기준)</span></div>';
+  h += tbl(D.listed_mon||[], T1);
+  h += '<div class="sec">② 월별 예심 승인율 <span class="cnt">(26년 · 스팩 제외 병기)</span></div>';
+  h += tbl(D.approval||[], T2);
+  h += '<div class="sec">③ 수요예측 · 청약 현황 <span class="cnt">(26년 상장 월별 평균)</span></div>';
+  h += tbl(D.yc||[], T3, {totalKey:"합계"});
   h += '<div class="sec">④ 추가 분석 데이터 <span class="cnt">(비밀번호 필요)</span></div>';
   h += '<div class="ctrl"><label>비밀번호</label><input type="password" id="t3pw" class="dt" style="width:130px" autocomplete="off"><button class="preset" id="t3unlock">확인</button></div>';
   h += '<div id="t3secret"></div>';
   document.getElementById('t3body').innerHTML = h;
   var ub=document.getElementById('t3unlock'); if(ub) ub.onclick=unlockSecret;
   var pw=document.getElementById('t3pw'); if(pw) pw.addEventListener('keydown',function(e){ if(e.key==='Enter') unlockSecret(); });
-  EXPORT.t3 = {sheets:[{name:'월별현황', cols:MONTH, rows:disp}], fname:'분석_'+stamp(from,to)+'.xlsx'};
+  EXPORT.t3 = {sheets:[{name:'월별상장',cols:T1,rows:D.listed_mon||[]},{name:'예심승인율',cols:T2,rows:D.approval||[]},{name:'수요예측청약',cols:T3,rows:D.yc||[]}], fname:'분석_'+isoAsof()+'.xlsx'};
 }
 function unlockSecret(){
   var box=document.getElementById('t3secret');
@@ -1204,7 +1193,7 @@ renderT1(); renderT2(); renderT3();
 </script></body></html>
 """
 
-def build_dashboard(kind_data, web):
+def build_dashboard(kind_data, web, kind_master=None):
     """엑셀과 동일한 데이터로 3탭 웹페이지(index.html)를 생성."""
     def scr(rows):
         out = []
@@ -1259,40 +1248,75 @@ def build_dashboard(kind_data, web):
     share = [{"대표주관사": s["대표주관사"], "건수": s["건수"],
               "공모금액": f'{s["공모금액"]:,.0f}' if s["공모금액"] else ""} for s in web["share"]]
 
-    # 수요예측·청약 현황 (상장 월별 평균 + 누적/합계 · 수집분 기준)
+    # ── 분석탭 3개 표 데이터 ──
     def _f(v):
         try: return float(str(v).replace(",", "").replace(":1", ""))
         except Exception: return None
     def _avg(a): return (sum(a) / len(a)) if a else None
+    MON = ["01","02","03","04","05","06","07","08","09","10","11","12"]
+    def _spac(nm): return bool(re.search(r"스팩|스펙|기업인수목적", nm or ""))
+
+    # 표1) 월별 상장기업수 · 24·25년=코스닥+유가 시트 G열(상장일)·양시장, 26년=상장완료(상장월)
+    HIST_LISTED = {
+        "2024": {"01":5,"02":10,"03":8,"04":5,"05":10,"06":14,"07":10,"08":11,"09":4,"10":11,"11":18,"12":11},
+        "2025": {"01":5,"02":11,"03":9,"04":3,"05":9,"06":4,"07":11,"08":11,"09":3,"10":1,"11":13,"12":22},
+    }
+    lc26 = {}
+    for x in listed:
+        d = (x.get("상장일") or "")
+        if d.startswith("2026") and len(d) >= 7:
+            lc26[d[5:7]] = lc26.get(d[5:7], 0) + 1
+    listed_mon = []
+    for yr in ("2024","2025","2026"):
+        src = HIST_LISTED.get(yr) or lc26
+        for i, m in enumerate(MON):
+            n = src.get(m, 0)
+            listed_mon.append({"연도": (yr[2:]+"년") if i == 0 else "",
+                               "월": str(int(m))+"월", "기업수": n if n else "-"})
+
+    # 표2) 26년 월별 예심 승인율 (스팩=회사명 기준 제외 병기)
+    ap = {m: {"승인":0,"승인ns":0,"철회":0,"철회ns":0} for m in MON}
+    for rec in (kind_master or {}).get("records", {}).values():
+        rd = (rec.get("결과확정일") or ""); ty = (rec.get("상장유형") or "").replace(" ","")
+        if not rd.startswith("2026") or "재상장" in ty: continue
+        res = (rec.get("심사결과") or "").replace(" ",""); m = rd[5:7]
+        if m not in ap: continue
+        ns = 0 if _spac(rec.get("회사명","")) else 1
+        if res in ("심사승인","상장승인"):
+            ap[m]["승인"] += 1; ap[m]["승인ns"] += ns
+        elif res in ("심사철회","공모철회","상장철회","심사미승인"):
+            ap[m]["철회"] += 1; ap[m]["철회ns"] += ns
+    approval = []
+    for i, m in enumerate(MON):
+        a = ap[m]; den = a["승인"]+a["철회"]; dns = a["승인ns"]+a["철회ns"]
+        approval.append({"연도": "26년" if i == 0 else "", "월": str(int(m))+"월",
+            "총승인": a["승인"] or "-", "스팩제외승인": a["승인ns"] or "-",
+            "철회미승인": a["철회"] or "-",
+            "승인율": f"{a['승인']/den*100:.1f}%" if den else "-",
+            "스팩제외승인율": f"{a['승인ns']/dns*100:.1f}%" if dns else "-"})
+
+    # 표3) 26년 월별 수요예측·청약 (참여기관수·수요예측경쟁률·청약경쟁률 평균)
     yo_m, cy_m = {}, {}
     for x in listed:
         d = (x.get("상장일") or "")
-        mo = d[:7] if len(d) >= 7 else ""
-        if not mo: continue
-        v = _f(x.get("수요예측경쟁률")); iv = _f(x.get("참여기관수"))
+        if not d.startswith("2026") or len(d) < 7: continue
+        m = d[5:7]
+        v = _f(x.get("수요예측경쟁률")); iv = _f(x.get("참여기관수")); cv = _f(x.get("청약경쟁률"))
         if v is not None:
-            yo_m.setdefault(mo, {"c": [], "i": []})
-            yo_m[mo]["c"].append(v)
-            if iv is not None: yo_m[mo]["i"].append(iv)
-        cv = _f(x.get("청약경쟁률"))
-        if cv is not None:
-            cy_m.setdefault(mo, []).append(cv)
-    yoyeuk, allc, alli = [], [], []
-    for mo in sorted(yo_m):
-        c, i = yo_m[mo]["c"], yo_m[mo]["i"]; allc += c; alli += i
-        yoyeuk.append({"월": mo, "기업수": len(c),
-            "경쟁률평균": f"{_avg(c):,.1f}:1" if c else "-",
-            "참여평균": f"{_avg(i):,.0f}" if i else "-"})
-    yoyeuk.append({"월": "누적", "기업수": len(allc),
-        "경쟁률평균": f"{_avg(allc):,.1f}:1" if allc else "-",
-        "참여평균": f"{_avg(alli):,.0f}" if alli else "-", "합계": True})
-    cheongyak, allcy = [], []
-    for mo in sorted(cy_m):
-        v = cy_m[mo]; allcy += v
-        cheongyak.append({"월": mo, "기업수": len(v),
-            "경쟁률평균": f"{_avg(v):,.1f}:1" if v else "-"})
-    cheongyak.append({"월": "합계", "기업수": len(allcy),
-        "경쟁률평균": f"{_avg(allcy):,.1f}:1" if allcy else "-", "합계": True})
+            yo_m.setdefault(m, {"c":[],"i":[]}); yo_m[m]["c"].append(v)
+            if iv is not None: yo_m[m]["i"].append(iv)
+        if cv is not None: cy_m.setdefault(m, []).append(cv)
+    yc, ac, ai, acy = [], [], [], []
+    for i, m in enumerate(MON):
+        c = yo_m.get(m,{}).get("c",[]); ii = yo_m.get(m,{}).get("i",[]); cc = cy_m.get(m,[])
+        ac += c; ai += ii; acy += cc
+        yc.append({"연도":"26년" if i == 0 else "", "월": str(int(m))+"월",
+            "참여평균": f"{_avg(ii):,.0f}" if ii else "-",
+            "수요예측평균": f"{_avg(c):,.1f}:1" if c else "-",
+            "청약평균": f"{_avg(cc):,.1f}:1" if cc else "-"})
+    yc.append({"연도":"누적", "월":"", "참여평균": f"{_avg(ai):,.0f}" if ai else "-",
+        "수요예측평균": f"{_avg(ac):,.1f}:1" if ac else "-",
+        "청약평균": f"{_avg(acy):,.1f}:1" if acy else "-", "합계": True})
 
     # 주관사 트랙레코드 원장 (리그 검증 정본)
     league, ledger = [], []
@@ -1307,7 +1331,8 @@ def build_dashboard(kind_data, web):
     DATA = {"asof": kind_data["asof"], "year": kind_data["year"],
             "screening": {k: scr(v) for k, v in kind_data["tables"].items()},
             "listed": listed, "prog": prog, "monthly": monthly, "share": share,
-            "yoyeuk": yoyeuk, "cheongyak": cheongyak, "league": league, "ledger": ledger}
+            "listed_mon": listed_mon, "approval": approval, "yc": yc,
+            "league": league, "ledger": ledger}
     html = DASH_TEMPLATE.replace("__DATA__", json.dumps(DATA, ensure_ascii=False))
     with open(os.path.join(BASE, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)
@@ -1456,7 +1481,7 @@ def main():
     web = build_excel(kind_data, kind_master, offering, listings)
 
     # [4-b] 3탭 웹 대시보드 (index.html 재생성 · 엑셀과 동일 데이터)
-    build_dashboard(kind_data, web)
+    build_dashboard(kind_data, web, kind_master)
 
     # [5] 원장 CSV (분석·가공용)
     export_ledgers(kind_master, offering, listings)
