@@ -208,11 +208,20 @@ def extract_registration(text):
         re.search(r"희망공모가액[^\d]{0,20}([\d,]+)\s*원?\s*[~∼]\s*([\d,]+)\s*원", text)
     if m: out["밴드"] = f"{m.group(1)}~{m.group(2)}"
 
-    m = re.search(r"보통주\s*\|\s*([\d,]+)\s*\|\s*[\d,]+\s*\|\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|", t)
-    if m:
+    # 공모개요: 신고서엔 '정정 전/정정 후' 표가 함께 실린다.
+    # 전체 원문에서 마지막 공모개요 = 정정 후(확정 반영본)이므로 그것을 채택.
+    _ov = list(re.finditer(
+        r"보통주\s*\|\s*([\d,]+)\s*\|\s*[\d,]+\s*\|\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|", text))
+    if _ov:
+        m = _ov[-1]
         out["공모주식수"] = m.group(1)
-        out["밴드하단가"] = m.group(2)
-        out["공모금액"] = m.group(3)
+        out["모집가액"]   = m.group(2)   # 확정 시 확정가, 그 전엔 밴드 하단
+        out["공모금액"]   = m.group(3)   # 확정 시 확정총액, 그 전엔 하단 기준 총액
+    # 최우선: 신고서 표지의 선언 금액(확정 시 확정총액이 그대로 기재됨)
+    m = re.search(r"모집\s*또는\s*매출\s*금액\s*[:：]\s*([\d,]+)\s*원", text)
+    if m: out["공모금액"] = m.group(1)
+    m = re.search(r"모집\s*또는\s*매출\s*증권의\s*종류\s*[:：][^\d]{0,20}([\d,]+)\s*주", text)
+    if m: out["공모주식수"] = m.group(1)
 
     m = re.search(r"인수대가[^\n]{0,200}?([\d.]+)\s*%", t)
     if m: out["수수료율"] = m.group(1) + "%"
@@ -477,6 +486,12 @@ def track_offerings(approved_names):
                 if mult: rec["멀티플"] = mult
                 fee = extract_perf_fee(text)
                 if fee and fee != "없음": rec["성과수수료"] = fee
+                # 확정공모가는 [발행조건확정] 신고서에서만 유효.
+                # 그 전(최초/정정)엔 "확정공모가액…밴드 하단 기준" 문구를 오인 추출하므로 비운다.
+                if status != "발행조건확정":
+                    rec["확정공모가"] = ""
+                # 공모금액은 신고서 '정정 후' 공모개요에서 그대로 읽으므로(재계산 불필요)
+                # 확정 시 자동으로 확정총액, 그 전엔 밴드 하단 기준 총액이 들어간다.
                 if rec.get("최신접수번호") != new_rcept:
                     changes.append(f"{name}: 신고서 갱신({status}) {new_rcept}")
             except Exception as e:
@@ -596,7 +611,11 @@ def collect_kind():
         unit = f.get("단위", "백만원"); cy = (rec.get("청구일") or "")[:4]
         base_year = "2024" if "FY24" in unit else (str(int(cy)-1) if cy.isdigit() else "")
         ld = lseed.get(_norm_name(rec.get("회사명","")), "") if res == "상장승인" else ""
-        hyun = APPMAP[res] + (f" ({ld})" if ld and ld != "수집예정" else "")
+        if res == "상장승인":
+            # 거래소 '상장승인'은 상장 전 단계. 실제 상장일이 확인될 때만 '상장완료'.
+            hyun = f"상장완료 ({ld})" if (ld and ld != "수집예정") else "상장승인(상장예정)"
+        else:
+            hyun = APPMAP[res]
         appr.append({"일자": rd, "회사명": rec.get("회사명",""),
             "유가": f.get("유가") or ("Y" if rec.get("시장")=="유가" else ""),
             "상장유형": rec.get("상장유형",""), "심사결과": rec.get("심사결과",""),
@@ -1090,12 +1109,12 @@ function renderT1(){
 /* ── 탭2 공모·상장 ── */
 const LISTED = [["기업명","기업명"],["상장트랙","트랙"],["상장일","상장일"],["밴드","공모가밴드(원)"],
   ["확정공모가","확정공모가(원)"],
-  ["공모주식수","공모주식수(주)",1],["공모금액","공모금액(백만원)",1],
+  ["공모주식수","공모주식수(주)",1],["공모금액","공모금액(원)",1],
   ["수요예측경쟁률","수요예측경쟁률"],["참여기관수","수요예측 참여기관수",1],
   ["멀티플","밸류 멀티플"],
   ["청약기간","청약기간"],["청약경쟁률","청약경쟁률"],["대표주관","대표주관"],["진행상태","상태"]];
 const PROG = [["회사명","기업명"],["수요예측기간","수요예측기간"],["밴드","공모가밴드(원)"],
-  ["확정공모가","확정공모가(원)"],["공모주식수","공모주식수(주)",1],["공모금액","공모금액(백만원)",1],
+  ["확정공모가","확정공모가(원)"],["공모주식수","공모주식수(주)",1],["공모금액","공모금액(원)",1],
   ["멀티플","밸류 멀티플"],["수요예측경쟁률","수요예측경쟁률"],["참여기관수","수요예측 참여기관수",1],
   ["청약기간","청약기간"],["청약경쟁률","청약경쟁률"],["상장예정일","상장예정일"],["대표주관","대표주관"],["상태","상태"]];
 function renderT2(){
@@ -1227,11 +1246,21 @@ def build_dashboard(kind_data, web, kind_master=None):
         if mo2 and int(mo2) != mo:
             return f"{y}-{mo:02d}-{d1:02d}~{int(mo2):02d}-{d2:02d}"   # 월 바뀌면 MM-DD~MM-DD
         return f"{y}-{mo:02d}-{d1:02d}~{d2:02d}"                        # 같은 월이면 MM-DD~DD
+    def _won(v, suffix=""):
+        """공모금액 → 원 단위 통일. 백만원(1e7 미만)으로 들어온 값은 ×1e6."""
+        s = str(v or "").strip()
+        if not s or s in ("수집예정", "해당없음"): return s
+        m = re.match(r"([\d,]+)", s)
+        if not m: return s
+        try: n = float(m.group(1).replace(",", ""))
+        except Exception: return s
+        if n < 1e7: n *= 1e6          # 백만원 표기 → 원
+        return f"{int(n):,}{suffix}"
 
     listed = [{
         "기업명": x.get("기업명",""), "상장트랙": x.get("상장트랙",""), "상장일": x.get("상장일",""),
         "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
-        "공모금액": x.get("공모금액",""), "멀티플": x.get("멀티플",""),
+        "공모금액": _won(x.get("공모금액","")), "멀티플": x.get("멀티플",""),
         "확정공모가": _comma(x.get("확정공모가","")), "참여기관수": x.get("참여기관수",""),
         "수요예측경쟁률": x.get("수요예측경쟁률",""),
         "청약기간": _fmt_sub(x.get("청약기간") or x.get("청약일정","")),
@@ -1241,7 +1270,9 @@ def build_dashboard(kind_data, web, kind_master=None):
     prog = [{
         "회사명": x.get("회사명",""), "수요예측기간": _fmt_sub(x.get("수요예측기간","")),
         "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
-        "공모금액": x.get("공모금액",""), "멀티플": x.get("멀티플",""),
+        "공모금액": _won(x.get("공모금액",""),
+                      " (확정)" if str(x.get("확정공모가") or "").strip() else " (하단)"),
+        "멀티플": x.get("멀티플",""),
         "확정공모가": _comma(x.get("확정공모가","")), "참여기관수": x.get("참여기관수",""),
         "수요예측경쟁률": x.get("수요예측경쟁률",""),
         "청약기간": _fmt_sub(x.get("청약일정","")),
@@ -1470,9 +1501,16 @@ def main():
         offering = json.load(open(OFFERING_JSON, encoding="utf-8")) \
                    if os.path.exists(OFFERING_JSON) else {}
     else:
-        offering, ch = track_offerings(approved)
-        print(f"[DART] 공모 추적: {len(offering)}건 · 변경 {len(ch)}건")
-        for c in ch: print("   -", c)
+        try:
+            offering, ch = track_offerings(approved)
+            print(f"[DART] 공모 추적: {len(offering)}건 · 변경 {len(ch)}건")
+            for c in ch: print("   -", c)
+        except Exception as e:
+            import traceback
+            print(f"[DART] 공모 추적 실패(무시, 캐시 사용): {e}")
+            traceback.print_exc()
+            offering = json.load(open(OFFERING_JSON, encoding="utf-8")) \
+                       if os.path.exists(OFFERING_JSON) else {}
 
     # [3-c] 신규 상장딜 신고서 자동발췌 → listing_seed.json · underwriter_ledger.json 갱신
     corp_map = dict(CORP_SEED)
