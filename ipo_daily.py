@@ -448,20 +448,27 @@ def enrich_listed_from_dart(listings, corp_map):
     if not DART_API_KEY:
         print("[ENRICH] DART 키 없음 → 신고서 자동발췌 생략"); return
     seed_path = os.path.join(BASE, "listing_seed.json")
-    seed = {x["기업명"]: x for x in _load_listing_seed()}
+    _sl = _load_listing_seed()
+    seed = {x["기업명"]: x for x in _sl}
+    # KIND 표기와 시드 표기가 달라도 같은 종목이면 같은 행을 쓴다.
+    # (예: 케이뱅크 (유가)=케이뱅크, 교보스팩20호=교보20호스팩, NH스팩33호=엔에이치스팩33호)
+    # 이 인덱스 없이 exact-name으로만 찾으면 시드에 유령 행이 추가돼 표가 중복된다.
+    nidx = {_norm_name(x["기업명"]): x["기업명"] for x in _sl}
     changed = 0
     for l in listings:
         nm = l["회사명"]
         ty = (l.get("상장유형") or "")
         if "합병" in ty:            # 스팩합병 상장은 공모개념 없음
             continue
-        rec = seed.get(nm)
+        key = _norm_name(nm)
+        rec = seed.get(nidx[key]) if key in nidx else seed.get(nm)
         if rec is None:
-            rec = {"기업명": nm, "진행상태": "상장완료"}; seed[nm] = rec
+            rec = {"기업명": nm, "진행상태": "상장완료"}
+            seed[nm] = rec; nidx[key] = nm
         # 이미 백필된 딜은 건너뜀(수동검증 우선)
         if str(rec.get("수요예측경쟁률") or "") not in ("", "수집예정"):
             continue
-        code = corp_map.get(nm)
+        code = corp_map.get(nm) or corp_map.get(rec.get("기업명", ""))
         if not code:
             continue
         try:
@@ -497,6 +504,72 @@ def enrich_listed_from_dart(listings, corp_map):
         print(f"[ENRICH] listing_seed.json 자동갱신 {changed}건")
 
 
+def _recalc_league(dl):
+    """딜원장 → 주관사집계 재계산."""
+    agg = {}
+    for d in dl:
+        for u in d.get("인수인", []):
+            a = agg.setdefault(u["증권사"], {"증권사": u["증권사"], "인수금액": 0.0,
+                "인수수수료": 0.0, "청약수수료": 0.0, "전체수수료": 0.0, "건수": 0})
+            for k in ("인수금액", "인수수수료", "청약수수료", "전체수수료"):
+                a[k] += u.get(k, 0) or 0
+        for u in d.get("인수인", []):
+            if u.get("역할") in ("대표", "공동대표"):
+                agg[u["증권사"]]["건수"] += 1
+    for a in agg.values():
+        for k in ("인수금액", "인수수수료", "청약수수료", "전체수수료"):
+            a[k] = round(a[k], 3)
+    return sorted(agg.values(), key=lambda r: -r["전체수수료"])
+
+
+def _is_spac(name):
+    return bool(re.search(r"스팩|스펙|기업인수목적", name or ""))
+
+
+def _heal_ledger(L, path=None):
+    """원장 자가치유 — 실행 때마다 두 가지를 강제한다.
+       ① 표기차로 이중 적재된 딜 제거 (교보스팩20호 = 교보20호스팩 등)
+          → 안 하면 인수금액·수수료·건수가 2배로 잡힌다.
+       ② 스팩 청약수수료 = 0 (리그 기준: 스팩은 청약수수료 미반영)
+          → 수기 백필분이 0.75%를 매겨둔 게 있어 실행 시 0으로 되돌린다."""
+    dl = L.get("딜원장", [])
+    keep, seen, dropped = [], {}, []
+    for d in dl:
+        k = _norm_name(d.get("업체", ""))
+        if k not in seen:
+            seen[k] = len(keep); keep.append(d); continue
+        prev = keep[seen[k]]
+        def score(x):   # 정보가 더 채워진 행을 남긴다(동점이면 먼저 들어온 원본 유지)
+            return sum(1 for f in ("상장일", "납입일", "시장", "발행금액")
+                       if str(x.get(f, "") or "").strip())
+        if score(d) > score(prev):
+            dropped.append(prev.get("업체", "")); keep[seen[k]] = d
+        else:
+            dropped.append(d.get("업체", ""))
+
+    zeroed = 0
+    for d in keep:
+        if not _is_spac(d.get("업체", "")):
+            continue
+        for u in d.get("인수인", []):
+            if (u.get("청약수수료", 0) or 0) != 0:
+                u["청약수수료"] = 0.0
+                u["전체수수료"] = round(u.get("인수수수료", 0) or 0, 3)
+                zeroed += 1
+
+    if dropped or zeroed:
+        L["딜원장"] = keep
+        L["주관사집계"] = _recalc_league(keep)
+        if dropped:
+            print(f"[원장] 중복 딜 {len(dropped)}건 제거: {', '.join(dropped)} → {len(keep)}건")
+        if zeroed:
+            print(f"[원장] 스팩 청약수수료 0 적용: {zeroed}건")
+        if path:
+            json.dump(L, open(path, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=1)
+    return L
+
+
 def _extend_ledger(company, listing, underwriters):
     """인수인 표를 underwriter_ledger.json 딜원장에 추가하고 집계 재계산.
        청약수수료=기관배정액(75% 가정)×1%(스팩 제외) · 인수수수료=인수대가."""
@@ -505,7 +578,10 @@ def _extend_ledger(company, listing, underwriters):
         return
     L = json.load(open(lp, encoding="utf-8"))
     dl = L.setdefault("딜원장", [])
-    if any(d.get("업체") == company for d in dl):
+    # 이미 있는 딜이면 절대 다시 넣지 않는다. 표기차(교보스팩20호=교보20호스팩,
+    # 신한스팩17호=신한제17호스팩)를 정확일치로만 보면 같은 딜이 두 번 들어가
+    # 인수금액·수수료·건수가 이중계상된다.
+    if any(_norm_name(d.get("업체", "")) == _norm_name(company) for d in dl):
         return
     is_spac = bool(re.search(r"스팩|스펙|기업인수목적", company))
     total = round(sum(u["인수금액"] for u in underwriters), 2)
@@ -737,9 +813,45 @@ def collect_kind():
 # ════════════════════════════════════════════════════════════════════
 V = "수집예정"; NA = "해당없음"
 
+def _seed_filled(x):
+    """수집된 필드 수(중복 행 중 '더 알찬' 행을 고르는 기준)."""
+    return sum(1 for k, v in (x or {}).items()
+               if k != "기업명" and str(v or "").strip() not in ("", "수집예정", "-"))
+
+
+def _dedupe_seed(rows):
+    """같은 종목이 표기만 달라 두 행으로 들어온 경우 하나로 합친다.
+       예) '케이뱅크 (유가)' + '케이뱅크', '교보스팩20호' + '교보20호스팩'
+       - 표시명: 더 알찬(수집 필드 많은) 행의 이름을 채택
+       - 값: 알찬 행을 기준으로, 비어 있는 칸만 다른 행에서 보충
+       과거 실행이 이미 만들어 둔 유령 행도 읽는 시점에 자동 정리된다."""
+    groups = {}
+    for x in rows:
+        groups.setdefault(_norm_name(x.get("기업명", "")), []).append(x)
+    out, merged = [], 0
+    for g in groups.values():
+        if len(g) == 1:
+            out.append(g[0]); continue
+        g = sorted(g, key=_seed_filled, reverse=True)
+        base = dict(g[0])
+        for other in g[1:]:
+            for k, v in other.items():
+                if k == "기업명":
+                    continue
+                if str(base.get(k, "") or "").strip() in ("", "수집예정", "-") \
+                   and str(v or "").strip() not in ("", "수집예정", "-"):
+                    base[k] = v
+        merged += len(g) - 1
+        out.append(base)
+    if merged:
+        print(f"[SEED] 표기 중복 {merged}행 병합 → {len(out)}행")
+    return out
+
+
 def _load_listing_seed():
     p = os.path.join(BASE, "listing_seed.json")
-    return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else []
+    rows = json.load(open(p, encoding="utf-8")) if os.path.exists(p) else []
+    return _dedupe_seed(rows)
 
 def _norm_name(s):
     """상장사 이름 매칭용 정규화 키.
@@ -1456,6 +1568,7 @@ def build_dashboard(kind_data, web, kind_master=None):
     if os.path.exists(lp):
         try:
             LJ = json.load(open(lp, encoding="utf-8"))
+            LJ = _heal_ledger(LJ, lp)
             league = LJ.get("주관사집계", []); ledger = LJ.get("딜원장", [])
         except Exception as e:
             print(f"  [경고] 원장 로드 실패: {e}")
