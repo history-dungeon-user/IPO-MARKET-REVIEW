@@ -58,7 +58,8 @@ CORP_SEED = {
  "기도산업":"00229085","브릴스":"01801026","니어스랩":"01588897","스카이랩스":"01586923",
  "해치텍":"01947443","와이즈플래닛컴퍼니":"01867688","케이앤에스아이앤씨":"00920731",
  "빅웨이브로보틱스":"01722066","인제니아테라퓨틱스":"02031369","에이치엘지노믹스":"00624244",
- "레메디":"01501764","딜리셔스":"01461730",
+ "레메디":"01501764","딜리셔스":"01461730","덕양에너젠":"01516933",
+ "네오사피엔스":"01876251","엠에스바이오":"01749559",
 }
 
 TODAY = datetime.date.today().strftime("%Y%m%d")
@@ -171,6 +172,83 @@ def dart_document_text(rcept_no):
         s = re.sub(r"[ \t]+", " ", s)
         texts.append(s)
     return "\n".join(texts)
+
+
+_CORPCODE_IDX = None
+
+def dart_corp_code_index():
+    """DART 전체 회사 고유번호 목록(corpCode.xml) → {회사명: [(corp_code, stock_code, modify_date)]}
+       실행당 1회만 내려받아 캐시."""
+    global _CORPCODE_IDX
+    if _CORPCODE_IDX is not None:
+        return _CORPCODE_IDX
+    idx = {}
+    try:
+        r = requests.get(f"{DART}/corpCode.xml",
+                         params={"crtfc_key": DART_API_KEY}, timeout=120)
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        raw = zf.read(zf.namelist()[0]).decode("utf-8", "ignore")
+        for mm in re.finditer(r"<list>(.*?)</list>", raw, re.S):
+            b = mm.group(1)
+            def g(tag):
+                t = re.search(rf"<{tag}>(.*?)</{tag}>", b, re.S)
+                return t.group(1).strip() if t else ""
+            nm = g("corp_name")
+            if nm:
+                idx.setdefault(nm, []).append(
+                    (g("corp_code"), g("stock_code"), g("modify_date")))
+        print(f"[DART] corpCode.xml 로드: {len(idx):,}개 법인")
+    except Exception as e:
+        print(f"[DART] corpCode.xml 조회 실패(무시): {e}")
+    _CORPCODE_IDX = idx
+    return idx
+
+
+def _corp_key(s):
+    return re.sub(r"[\s㈜\(\)]|주식회사", "", s or "")
+
+
+def resolve_corp_codes(names, corp_map):
+    """corp_map에 없는 회사명을 DART corpCode.xml로 자동 해결 → corp_map.json에 영구 저장.
+       (이게 없으면 신규 승인법인이 'corp_code 미확보'로 남아 신고서를 아예 못 읽는다.)"""
+    missing = [n for n in dict.fromkeys(names) if n and n not in corp_map]
+    if not missing or not DART_API_KEY:
+        return corp_map
+    idx = dart_corp_code_index()
+    if not idx:
+        return corp_map
+    flat = None
+    found = {}
+    for n in missing:
+        cands = idx.get(n)
+        if not cands:                       # ㈜·공백·괄호 차이 흡수
+            if flat is None:
+                flat = {}
+                for cn, cl in idx.items():
+                    flat.setdefault(_corp_key(cn), []).extend(cl)
+            cands = flat.get(_corp_key(n))
+        if not cands:
+            continue
+        # 상장코드 보유 건 우선 → 최근 수정일 우선
+        cands = sorted(cands, key=lambda c: (0 if c[1] else 1,
+                                             -int(re.sub(r"\D", "", c[2]) or 0)))
+        found[n] = cands[0][0]
+        print(f"  [corp_code 자동해결] {n} → {cands[0][0]}")
+    if found:
+        corp_map.update(found)
+        cm_path = os.path.join(BASE, "corp_map.json")
+        cur = {}
+        if os.path.exists(cm_path):
+            try: cur = json.load(open(cm_path, encoding="utf-8")).get("corp_map", {})
+            except Exception: pass
+        cur.update(found)
+        json.dump({"corp_map": cur}, open(cm_path, "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+    still = [n for n in missing if n not in found]
+    if still:
+        print(f"[DART] corp_code 미해결 {len(still)}건(수동확인): {', '.join(still)}")
+    return corp_map
+
 
 def latest_filing(filings):
     """최신 증권신고서 1건 + 상태 판별 + 실적보고서 여부"""
@@ -471,6 +549,11 @@ def track_offerings(approved_names):
     if os.path.exists(cm_path):
         try: corp_map.update(json.load(open(cm_path, encoding="utf-8")).get("corp_map", {}))
         except Exception: pass
+    # 시드에 없는 신규 승인법인 → DART 전체목록에서 corp_code 자동 해결
+    try:
+        corp_map = resolve_corp_codes(approved_names, corp_map)
+    except Exception as e:
+        print(f"[DART] corp_code 자동해결 실패(무시): {e}")
 
     changes = []
     for name in approved_names:
@@ -1528,6 +1611,10 @@ def main():
     if os.path.exists(_cm):
         try: corp_map.update(json.load(open(_cm, encoding="utf-8")).get("corp_map", {}))
         except Exception: pass
+    try:
+        corp_map = resolve_corp_codes([l.get("회사명") for l in listings], corp_map)
+    except Exception as e:
+        print(f"[ENRICH] corp_code 자동해결 실패(무시): {e}")
     try:
         enrich_listed_from_dart(listings, corp_map)
     except Exception as e:
