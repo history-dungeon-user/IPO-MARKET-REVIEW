@@ -164,12 +164,19 @@ def dart_document_text(rcept_no):
                 s = raw.decode(enc); break
             except Exception:
                 s = raw.decode("utf-8", "ignore")
-        # 표 셀 경계 유지하며 태그 제거
-        s = re.sub(r"</T[DHU][^>]*>", " | ", s, flags=re.I)
-        s = re.sub(r"</TR[^>]*>", "\n", s, flags=re.I)
+        # 표 셀 경계를 유지하며 태그 제거.
+        # ※ DART 원문 XML은 제출대행사마다 서식이 달라, 셀마다 줄바꿈+들여쓰기가
+        #    들어간 문서가 있다. 그대로 두면 표 한 행이 여러 줄로 쪼개져서
+        #    '한 행 = 한 줄'을 가정한 파서가 통째로 실패한다(에이치엘지노믹스 수요예측 사례).
+        #    → 행 끝(</TR>)을 먼저 보호해 두고, 셀 사이 줄바꿈만 제거해 행을 한 줄로 만든다.
+        s = re.sub(r"</TR[^>]*>", "\x01", s, flags=re.I)      # 행 끝 보호
+        s = re.sub(r"</T[DHU][^>]*>", " | ", s, flags=re.I)   # 셀 경계
         s = re.sub(r"<[^>]+>", " ", s)
         s = re.sub(r"&[a-z]+;", " ", s)
         s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r"\|[ \t]*\n[ \t]*", "| ", s)              # 셀 뒤 줄바꿈 제거
+        s = re.sub(r"\n[ \t]*\|", " |", s)                    # 셀 앞 줄바꿈 제거
+        s = s.replace("\x01", "\n")                           # 행 끝 복원
         texts.append(s)
     return "\n".join(texts)
 
@@ -315,8 +322,19 @@ def extract_registration(text):
     if m: out["수수료율"] = m.group(1) + "%"
     m = re.search(r"대표주관회사\s*\|\s*([가-힣A-Za-z()㈜ ]+?)\s*\|[^\n]*?\|\s*([\d,]+)\s*\|\s*총액인수", t)
     if m: out["대표주관"], out["인수대가"] = m.group(1).strip(), m.group(2)
+    # 공동주관: 신고서엔 정정 전/정정 후/본문에 같은 인수인 표가 여러 번 실려서
+    # 그대로 모으면 'IBK, IBK, IBK…'처럼 같은 증권사가 반복된다. 약칭으로 통일해 중복 제거.
     co = re.findall(r"공동주관회사\s*\|\s*([가-힣A-Za-z()㈜ ]+?)\s*\|", t)
-    if co: out["공동주관"] = ", ".join(x.strip() for x in co)
+    if co:
+        seen = []
+        for x in co:
+            x = x.strip()
+            if "증권" not in x:          # '보통주' 같은 오정렬 셀 배제
+                continue
+            a = _abbr_firm(x)
+            if a and a not in seen:
+                seen.append(a)
+        if seen: out["공동주관"] = ", ".join(seen)
 
     m = re.search(r"(비교회사|유사회사|적용)\s*(P/?E R?|PER|PSR|EV/EBITDA)[^\d]{0,30}([\d.]+)\s*배?", t, re.I)
     if m: out["멀티플"] = f"{m.group(3)} ({m.group(2).upper().replace(' ','')})"
@@ -369,7 +387,12 @@ def extract_performance(text):
 _FIRM_ABBR = [("미래에셋","미래"),("한국투자","한국"),("엔에이치","NH"),("NH투자","NH"),
     ("케이비","KB"),("KB","KB"),("삼성","삼성"),("신한투자","신한"),("대신","대신"),
     ("하나","하나"),("키움","키움"),("유진투자","유진"),("메리츠","메리츠"),
-    ("교보","교보"),("현대차","현대차"),("유안타","유안타"),("IBK","IBK"),("BNK","BNK")]
+    ("교보","교보"),("현대차","현대차"),("유안타","유안타"),
+    # 한글 표기와 영문 표기가 같은 회사로 묶이지 않으면 'IBK, 아이비케이'처럼 중복된다.
+    ("아이비케이","IBK"),("IBK","IBK"),("디비","DB"),("DB","DB"),
+    ("비엔케이","BNK"),("BNK","BNK"),("에스케이","SK"),("SK","SK"),
+    ("신영","신영"),("한화","한화"),("케이프","케이프"),("상상인","상상인"),
+    ("하이투자","하이"),("다올","다올"),("이베스트","이베스트"),("LS","LS")]
 def _abbr_firm(name):
     for k, v in _FIRM_ABBR:
         if k in name: return v
