@@ -988,6 +988,45 @@ def build_excel(kind_data, kind_master, offering, listings):
                 seed[nm] = {"기업명": nm, "상장일": l["상장일"],
                             "진행상태": "상장완료" + ("(스팩합병)" if "합병" in l.get("상장유형","") else "")}
                 norm_index[key] = nm
+
+    # ── 공모 진행 → 상장 완료 '승격' ───────────────────────────────────────
+    # 상장되는 순간, offering_master에 이미 검증돼 쌓인 값(수요예측·청약·주관사…)을
+    # 상장 정본(listing_seed)으로 이관한다.
+    # 이 단계가 없으면 상장 직후 그 칸들이 통째로 빈다(레메디 사례).
+    _OFF2SEED = {"수요예측기간": "수요예측기간", "밴드": "밴드",
+                 "공모주식수": "공모주식수", "공모금액": "공모금액",
+                 "멀티플": "멀티플", "확정공모가": "확정공모가",
+                 "수요예측경쟁률": "수요예측경쟁률", "참여기관수": "참여기관수",
+                 "청약일정": "청약기간", "청약경쟁률": "청약경쟁률",
+                 "대표주관": "대표주관", "공동주관": "공동주관",
+                 "인수대가": "인수수수료", "수수료율": "수수료율"}
+    _SKIP = ("", "수집예정", "완료", "해당없음", "-")
+
+    def _plain(v):   # '20,700 (완료)' · '24,840 (확정)' → 꼬리표 제거
+        return re.sub(r"\s*\((?:확정|완료|하단)\)\s*$", "", str(v or "").strip())
+
+    promoted = []
+    for _nm, _rec in (offering or {}).items():
+        _k = _norm_name(_nm)
+        tgt = seed.get(norm_index[_k]) if _k in norm_index else seed.get(_nm)
+        if not tgt or not str(tgt.get("상장일", "")).startswith("20"):
+            continue                       # 아직 상장 전이면 승격하지 않음
+        hit = False
+        for src, dst in _OFF2SEED.items():
+            v = _plain(_rec.get(src, ""))
+            if v in _SKIP:
+                continue
+            if str(tgt.get(dst, "") or "").strip() in ("", "수집예정"):
+                tgt[dst] = v; hit = True   # 빈 칸만 채운다(수기검증 값 보존)
+        if hit:
+            tgt.setdefault("진행상태", "상장완료")
+            promoted.append(tgt.get("기업명", _nm))
+    if promoted:
+        json.dump(list(seed.values()),
+                  open(os.path.join(BASE, "listing_seed.json"), "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+        print(f"[승격] 공모 → 상장완료 이관 {len(promoted)}건: {', '.join(promoted)}")
+
     FIELDS = ["기업명","수요예측기간","밴드","공모주식수","공모금액","멀티플","확정공모가",
               "수요예측경쟁률","참여기관수","청약일정","청약경쟁률","상장예정일","상장일",
               "대표주관","공동주관","인수수수료","수수료율","진행상태"]
@@ -1312,7 +1351,10 @@ function renderT1(){
 }
 
 /* ── 탭2 공모·상장 ── */
-const LISTED = [["기업명","기업명"],["상장트랙","트랙"],["상장일","상장일"],["밴드","공모가밴드(원)"],
+// 상장트랙: 신규 딜에서 자동 수집할 소스가 아직 없어 화면에서는 숨김.
+// 데이터는 listing_seed.json 에 그대로 남아 있으므로, 소스가 정해지면 아래 한 줄만 되살리면 된다.
+//   ["상장트랙","트랙"],
+const LISTED = [["기업명","기업명"],["상장일","상장일"],["밴드","공모가밴드(원)"],
   ["확정공모가","확정공모가(원)"],
   ["공모주식수","공모주식수(주)",1],["공모금액","공모금액(원)",1],
   ["수요예측경쟁률","수요예측경쟁률"],["참여기관수","수요예측 참여기관수",1],
