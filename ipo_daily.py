@@ -870,11 +870,54 @@ def _norm_name(s):
         s = s.replace("제", "").replace("호", "")
     return s
 
+def refresh_screening_status(kind_data, listings):
+    """예심 탭 '현황' 재계산.
+
+    collect_kind()는 파이프라인 맨 앞에서 돌기 때문에 그 시점엔 '이 회사가 상장했는지'를
+    모른다. 상장 여부는 뒤에서(KIND 신규상장 + 스팩합병 병합 + 공모 승격) 확정된다.
+    그래서 상장일이 다 모인 지금 시점에 다시 매긴다.
+
+    이게 없어서 생긴 증상:
+      · 레메디(심사승인)      — 심사승인 건은 상장 여부를 아예 안 봐서 영원히 '상장전'
+      · 세미티에스·케이피항공산업 — 스팩 소멸합병이라 시드 상장일이 '수집예정'
+                                → 이미 상장했는데도 '상장승인(상장예정)'
+    """
+    dates = {}
+    for x in _load_listing_seed():
+        d = str(x.get("상장일", "") or "")
+        if d.startswith("20"):
+            dates[_norm_name(x.get("기업명", ""))] = d
+    for l in (listings or []):                 # 스팩합병 병합분 포함
+        d = str(l.get("상장일", "") or "")
+        if d.startswith("20"):
+            dates[_norm_name(l.get("회사명", ""))] = d
+
+    fixed = 0
+    for row in (kind_data.get("tables", {}) or {}).get("승인", []):
+        res = (row.get("심사결과") or "").replace(" ", "")
+        d = dates.get(_norm_name(row.get("회사명", "")))
+        if d:
+            new = f"상장완료 ({d})"
+        elif res == "상장승인":
+            new = "상장승인(상장예정)"
+        elif res == "심사승인":
+            new = "상장전"
+        else:
+            continue                            # 공모철회·상장철회는 그대로
+        if row.get("현황") != new:
+            row["현황"] = new; fixed += 1
+    if fixed:
+        print(f"[KIND] 예심 탭 현황 재계산: {fixed}건 (상장 확정 반영)")
+
+
 def build_excel(kind_data, kind_master, offering, listings):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from collections import defaultdict
+
+    # 예심 시트를 쓰기 전에 '현황'을 상장 확정 기준으로 다시 매긴다.
+    refresh_screening_status(kind_data, listings)
 
     FONT = "맑은 고딕"
     def F(bold=False, size=10, color="000000", italic=False):
@@ -1693,6 +1736,75 @@ def export_ledgers(kind_master, offering, listings):
 
 
 # ════════════════════════════════════════════════════════════════════
+# [6] RAW 통합집계 · 리그26 시트 재생성 (원장 = 유일한 정본)
+# ════════════════════════════════════════════════════════════════════
+RAW_XLSX = os.path.join(BASE, "IPO_Rawdata_master.xlsx")
+LEAGUE_COLS = ["연번","상장일","업체","시장구분","발행금액","인수회사","인수금액",
+               "인수수수료","청약수수료 추정","수수료합계","건수","주관형태","상장트랙",
+               "기관배정수량","공모가","인수비율","총기관배정수량","청약일","납입일"]
+
+def rebuild_raw_league():
+    """IPO_Rawdata_master.xlsx 의 '리그26' 시트를 underwriter_ledger.json 에서 다시 생성.
+       - 손으로 만든 시트는 공동주관·인수단 행이 빠지고, 수수료 정정도 반영되지 않아
+         대시보드 리그테이블과 서로 다른 숫자를 말하는 상태였다.
+       - 이제 원장이 유일한 정본이고, 이 시트는 그 파생물이다.
+       다른 시트(_안내·코스닥·유가·리그24·리그25)는 손대지 않는다."""
+    lp = os.path.join(BASE, "underwriter_ledger.json")
+    if not (os.path.exists(RAW_XLSX) and os.path.exists(lp)):
+        return
+    from openpyxl import load_workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    L = json.load(open(lp, encoding="utf-8"))
+    seed = {_norm_name(x["기업명"]): x for x in _load_listing_seed()}
+
+    def _n(v):
+        try: return float(re.sub(r"[^\d.]", "", str(v or "")) or 0)
+        except Exception: return 0.0
+
+    rows, seq = [], 0
+    for d in sorted(L.get("딜원장", []), key=lambda x: (x.get("상장일") or "9999", x.get("업체",""))):
+        s = seed.get(_norm_name(d.get("업체", ""))) or {}
+        total  = _n(d.get("발행금액"))
+        price  = _n(s.get("확정공모가"))
+        shares = _n(s.get("공모주식수"))
+        inst   = round(shares * 0.75) if shares else ""      # 총기관배정수량 = 공모주식수 × 75%
+        for u in d.get("인수인", []):
+            seq += 1
+            ratio = round(_n(u.get("인수금액")) / total, 6) if total else ""
+            rows.append([
+                seq, d.get("상장일", ""), d.get("업체", ""), d.get("시장", ""),
+                total, u.get("증권사", ""), u.get("인수금액", ""),
+                u.get("인수수수료", ""), u.get("청약수수료", 0),
+                u.get("전체수수료", ""),
+                "○" if u.get("역할") in ("대표", "공동대표") else "",
+                u.get("역할", ""), s.get("상장트랙", ""),
+                (round(inst * ratio) if (inst and ratio) else ""),
+                (price or ""), (ratio or ""), (inst or ""),
+                s.get("청약기간", "") or s.get("청약일정", ""),
+                d.get("납입일", "") or s.get("납입일", ""),
+            ])
+
+    wb = load_workbook(RAW_XLSX)
+    if "리그26" not in wb.sheetnames:
+        wb.create_sheet("리그26")
+    ws = wb["리그26"]
+    ws.delete_rows(1, ws.max_row)                      # 통째로 비우고 다시 씀
+    ws.append(LEAGUE_COLS)
+    for c in range(1, len(LEAGUE_COLS) + 1):
+        cell = ws.cell(1, c)
+        cell.font = Font(name="맑은 고딕", bold=True, size=10, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F3864")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for r in rows:
+        ws.append(r)
+    ws.freeze_panes = "A2"
+    wb.save(RAW_XLSX)
+    print(f"[RAW] 리그26 재생성: 딜 {len(L.get('딜원장', []))}건 · {len(rows)}행 "
+          f"(공동주관·인수단 포함 · 스팩 청약수수료 0)")
+
+
+# ════════════════════════════════════════════════════════════════════
 # 메인
 # ════════════════════════════════════════════════════════════════════
 def main():
@@ -1783,7 +1895,15 @@ def main():
 
     # [5] 원장 CSV (분석·가공용)
     export_ledgers(kind_master, offering, listings)
-    print("\n[완료] IPO_analysis.xlsx / index.html(3탭) / events.csv / offerings.csv 갱신")
+
+    # [6] RAW 통합집계 리그26 시트 = 원장에서 재생성 (대시보드와 항상 같은 숫자)
+    try:
+        rebuild_raw_league()
+    except Exception as e:
+        print(f"[RAW] 리그26 재생성 실패(무시): {e}")
+
+    print("\n[완료] IPO_analysis.xlsx / index.html(3탭) / events.csv / offerings.csv "
+          "/ IPO_Rawdata_master.xlsx 갱신")
 
 if __name__ == "__main__":
     main()
