@@ -1228,7 +1228,8 @@ DASH_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>IPO 시장 동향</title>
 <style>
-  :root{--navy:#1F3864;--sub:#D9E1F2;--line:#D6DCE5;--muted:#6B7280;--bg:#F4F6FA;--red:#9A3B3B;}
+  :root{--navy:#1F3864;--sub:#D9E1F2;--line:#D6DCE5;--muted:#6B7280;--bg:#F4F6FA;--red:#9A3B3B;
+        --tblh:min(58vh,560px);}   /* 표 1개의 최대 높이 (넘으면 표 안에서 스크롤) */
   *{box-sizing:border-box;}
   body{margin:0;background:var(--bg);color:#1a1a1a;
        font-family:"맑은 고딕","Malgun Gothic",system-ui,sans-serif;font-size:14px;line-height:1.5;}
@@ -1249,13 +1250,25 @@ DASH_TEMPLATE = """<!DOCTYPE html>
   .search{margin:2px 0 10px;}
   .search input{width:260px;max-width:70%;padding:8px 12px;border:1px solid var(--line);
       border-radius:8px;font-size:14px;}
-  .tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;}
+  /* 표 크기 제한 + 제목행 고정
+     · 표 안에 커서를 두고 스크롤 → 표 내용만 움직이고 제목행은 붙어 있음
+     · 표 밖에서 스크롤        → 페이지 전체가 움직임
+     행이 몇 개 없으면 그 높이만큼만 차지하고, 많아지면 이 높이에서 멈추고 내부 스크롤. */
+  .tblwrap{max-height:var(--tblh);overflow:auto;border:1px solid var(--line);
+      border-radius:8px;}
+  .tblwrap.tall{--tblh:78vh;}          /* 행이 아주 많은 표(예심·상장완료)용 */
   table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap;}
   thead th{background:var(--navy);color:#fff;font-weight:600;padding:9px 10px;text-align:center;
-      position:sticky;top:0;}
+      position:sticky;top:0;z-index:2;box-shadow:inset 0 -1px 0 rgba(255,255,255,.20);}
   tbody td{padding:8px 10px;border-top:1px solid #EEF1F6;text-align:center;}
   tbody tr:nth-child(even){background:#FafBfD;}
   tbody tr:hover{background:#EEF3FB;}
+  /* 스크롤바를 얇게 — 표가 스크롤 가능하다는 신호도 됨 */
+  .tblwrap::-webkit-scrollbar{width:10px;height:10px;}
+  .tblwrap::-webkit-scrollbar-thumb{background:#C7CDD6;border-radius:6px;
+      border:2px solid #fff;}
+  .tblwrap::-webkit-scrollbar-thumb:hover{background:#A8B1BD;}
+  .tblwrap::-webkit-scrollbar-track{background:#F4F6FA;}
   td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;}
   td.name{text-align:left;font-weight:600;}
   .dash{color:#C7CDD6;}
@@ -1377,7 +1390,7 @@ function rerender(tab){ if(tab==='t1') renderT1(); else if(tab==='t2') renderT2(
 function esc(v){ return (v===null||v===undefined)?'':String(v); }
 function tbl(rows, cols, opts){
   opts = opts || {};
-  let h = '<div class="tblwrap"><table><thead><tr>';
+  let h = '<div class="tblwrap' + (opts.tall ? ' tall' : '') + '"><table><thead><tr>';
   h += cols.map(c=>`<th class="${c[2]?'num':''}">${c[1]}</th>`).join('');
   h += '</tr></thead><tbody>';
   if(!rows.length){
@@ -1409,7 +1422,7 @@ function renderT1(){
     let rows = (D.screening[k] || []).filter(r => inRange(r['일자'], from, to));
     if(q) rows = rows.filter(r => (r['회사명']||'').includes(q));
     h += `<div class="sec">${label} <span class="cnt">(${rows.length}건)</span></div>`;
-    h += tbl(rows, SCR);
+    h += tbl(rows, SCR, {tall:1});
     sheets.push({name: label.replace(/[^가-힣A-Za-z0-9]/g,''), cols: SCR, rows: rows});
   }
   document.getElementById('t1body').innerHTML = h;
@@ -1438,7 +1451,7 @@ function renderT2(){
     const from = val('t2from'), to = val('t2to');
     const rows = D.listed.filter(r => inRange(r['상장일'], from, to));
     h += `<div class="sec">상장 완료 (${D.year}) <span class="cnt">(${rows.length}건)</span></div>`;
-    h += tbl(rows, LISTED);
+    h += tbl(rows, LISTED, {tall:1});
     h += '<div class="note">※ 상장 완료 = KIND 신규상장 페이지 기준(스팩합병 포함) · '
        + '공모금액 = 밴드 하단(확정 시 확정총액) · 상장일 기준 기간 조회.</div>';
     EXPORT.t2 = {sheets:[{name:'상장완료', cols:LISTED, rows:rows}], fname:'상장완료_'+stamp(from,to)+'.xlsx'};
