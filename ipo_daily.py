@@ -1810,37 +1810,53 @@ function t4download(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "심사코멘트");
   XLSX.writeFile(wb, "심사코멘트_"+isoAsof()+".xlsx");
 }
-document.getElementById('t4go').onclick = t4open;
-document.getElementById('t4pw').addEventListener('keydown', function(e){
-  if(e.key==='Enter') t4open(); });
-if(!CAPI){
-  t4msg('저장소가 아직 연결되지 않았습니다. (Google 시트 설정 후 사용 가능)', 1);
-  document.getElementById('t4go').disabled = true;
-}
+/* ── 초기화 ──────────────────────────────────────────────────────────
+   ★ 핵심 표(예심/공모·상장/분석)를 '가장 먼저' 그린다.
+     한 부분(예: 심사코멘트 배선)에서 오류가 나도 표는 이미 떠 있도록,
+     각 배선을 개별 try 로 감싸 서로를 무너뜨리지 않게 한다.
+     — 과거: t4 배선이 renderT1 앞에 있어, 거기서 죽으면 표 전체가 빈 화면이 됐다. */
+function _safe(label, fn){ try{ fn(); }catch(e){ console.error('[init] '+label+' 실패:', e); } }
 
-document.querySelectorAll('.tabs button').forEach(b=>{
-  b.onclick = ()=>{
-    document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));
-    document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
-    b.classList.add('active');
-    document.getElementById(b.dataset.t).classList.add('active');
-  };
+_safe('renderT1', renderT1);
+_safe('renderT2', renderT2);
+_safe('renderT3', renderT3);
+
+_safe('탭 전환', function(){
+  document.querySelectorAll('.tabs button').forEach(function(b){
+    b.onclick = function(){
+      document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));
+      document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+      document.getElementById(b.dataset.t).classList.add('active');
+    };
+  });
 });
-document.querySelectorAll('.seg .segbtn').forEach(b=>{
-  b.onclick = ()=>{
-    document.querySelectorAll('.seg .segbtn').forEach(x=>x.classList.remove('active'));
-    b.classList.add('active'); T2VIEW = b.dataset.v; renderT2();
-  };
+_safe('세그먼트', function(){
+  document.querySelectorAll('.seg .segbtn').forEach(function(b){
+    b.onclick = function(){
+      document.querySelectorAll('.seg .segbtn').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active'); T2VIEW = b.dataset.v; renderT2();
+    };
+  });
 });
-document.querySelectorAll('.preset').forEach(b=>{ b.onclick = ()=>applyPreset(b.dataset.tab, b.dataset.p); });
-document.getElementById('q').addEventListener('input', renderT1);
-['t1from','t1to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT1));
-['t2from','t2to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT2));
-['t3from','t3to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT3));
-document.getElementById('dl1').onclick = ()=>download('t1');
-document.getElementById('dl2').onclick = ()=>download('t2');
-document.getElementById('dl3').onclick = ()=>download('t3');
-renderT1(); renderT2(); renderT3();
+_safe('프리셋/필터', function(){
+  document.querySelectorAll('.preset').forEach(function(b){ b.onclick = function(){ applyPreset(b.dataset.tab, b.dataset.p); }; });
+  document.getElementById('q').addEventListener('input', renderT1);
+  ['t1from','t1to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT1));
+  ['t2from','t2to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT2));
+  ['t3from','t3to'].forEach(id=>document.getElementById(id).addEventListener('change', renderT3));
+  document.getElementById('dl1').onclick = ()=>download('t1');
+  document.getElementById('dl2').onclick = ()=>download('t2');
+  document.getElementById('dl3').onclick = ()=>download('t3');
+});
+_safe('심사코멘트 배선', function(){
+  document.getElementById('t4go').onclick = t4open;
+  document.getElementById('t4pw').addEventListener('keydown', function(e){ if(e.key==='Enter') t4open(); });
+  if(!CAPI){
+    t4msg('저장소가 아직 연결되지 않았습니다. (Google 시트 설정 후 사용 가능)', 1);
+    document.getElementById('t4go').disabled = true;
+  }
+});
 </script></body></html>
 """
 
