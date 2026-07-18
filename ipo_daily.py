@@ -1258,7 +1258,9 @@ DASH_TEMPLATE = """<!DOCTYPE html>
   *{box-sizing:border-box;}
   body{margin:0;background:var(--bg);color:#1a1a1a;
        font-family:"맑은 고딕","Malgun Gothic",system-ui,sans-serif;font-size:14px;line-height:1.5;}
-  .wrap{max-width:1180px;margin:0 auto;padding:22px 18px 60px;}
+  /* 표가 많아 가로 스크롤이 잦으므로, 넓은 화면에선 폭을 최대한 넓게 쓴다.
+     (기존 1180px 고정 → 화면의 96%까지, 다만 너무 넓어 가독성이 떨어지지 않게 상한 2200px) */
+  .wrap{width:96%;max-width:2200px;margin:0 auto;padding:22px 18px 60px;}
   h1{font-size:22px;margin:0 0 4px;color:var(--navy);}
   .asof{color:var(--muted);font-size:12.5px;margin-bottom:16px;}
   .tabs{display:flex;gap:6px;border-bottom:2px solid var(--navy);margin-bottom:2px;flex-wrap:wrap;}
