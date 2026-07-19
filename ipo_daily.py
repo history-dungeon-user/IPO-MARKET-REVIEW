@@ -1668,7 +1668,7 @@ async function t4open(){
   const rows = (data && data.rows) || [];
   const can = rows.filter(function(r){ return r.kind==='canary'; })[0];
   if(!can){
-    if(!confirm('아직 비밀번호가 설정되지 않았습니다.\n지금 입력한 비밀번호로 설정할까요?\n\n※ 이 비밀번호를 잊으면 앞으로 쌓일 내용을 아무도 복구할 수 없습니다.')){
+    if(!confirm('아직 비밀번호가 설정되지 않았습니다.\\n지금 입력한 비밀번호로 설정할까요?\\n\\n※ 이 비밀번호를 잊으면 앞으로 쌓일 내용을 아무도 복구할 수 없습니다.')){
       t4msg(''); btn.disabled=false; return;
     }
     try{
