@@ -703,6 +703,10 @@ def track_offerings(approved_names):
                 uw = extract_underwriters(text)
                 syn = _syndicate_label(uw)
                 if syn: rec["주관사단"] = syn
+                # 인수인 상세(증권사별 인수금액·인수대가)를 저장.
+                # 투영(전체 상장 가정) 리그 계산에 쓴다. 신고서 기준값이라
+                # 최초·정정 = 밴드 하단 기준, 발행조건확정 = 확정 기준으로 자동 반영된다.
+                if uw: rec["인수인상세"] = uw
                 # 확정공모가는 [발행조건확정] 신고서에서만 유효.
                 # 그 전(최초/정정)엔 "확정공모가액…밴드 하단 기준" 문구를 오인 추출하므로 비운다.
                 if status != "발행조건확정":
@@ -1588,22 +1592,78 @@ function renderT3(){
   var pw=document.getElementById('t3pw'); if(pw) pw.addEventListener('keydown',function(e){ if(e.key==='Enter') unlockSecret(); });
   EXPORT.t3 = {sheets:[{name:'월별상장',cols:T1,rows:D.listed_mon||[]},{name:'예심승인율',cols:T2,rows:D.approval||[]},{name:'수요예측청약',cols:T3,rows:D.yc||[]}], fname:'분석_'+isoAsof()+'.xlsx'};
 }
+// 딜 목록 → 주관사 집계 (파이썬 _recalc_league 와 동일 규칙)
+function aggLeague(deals){
+  var agg={};
+  deals.forEach(function(d){
+    (d.인수인||[]).forEach(function(u){
+      var a=agg[u.증권사]||(agg[u.증권사]={증권사:u.증권사,인수금액:0,인수수수료:0,청약수수료:0,전체수수료:0,건수:0});
+      a.인수금액+=u.인수금액||0; a.인수수수료+=u.인수수수료||0;
+      a.청약수수료+=u.청약수수료||0; a.전체수수료+=u.전체수수료||0;
+    });
+    (d.인수인||[]).forEach(function(u){
+      if((u.역할==='대표'||u.역할==='공동대표') && agg[u.증권사]) agg[u.증권사].건수+=1;
+    });
+  });
+  return Object.keys(agg).map(function(k){
+    var a=agg[k];
+    ['인수금액','인수수수료','청약수수료','전체수수료'].forEach(function(f){ a[f]=Math.round(a[f]*1000)/1000; });
+    return a;
+  });
+}
+var LEAGUE_MODE='current';
+function renderLeague(){
+  var box=document.getElementById('t3lg'); if(!box) return;
+  var ledger=(D.ledger||[]), prog=(D.prog_ledger||[]);
+  var deals, note;
+  if(LEAGUE_MODE==='asof'){
+    var dt=(document.getElementById('lgdate')||{}).value||isoAsof();
+    deals=ledger.filter(function(d){ return (d._asof||'') && d._asof<=dt; });
+    note='기준일 '+dt+' 시점 · 납입 완료분('+deals.length+'건, 상장일−4영업일로 납입일 근사)';
+  } else if(LEAGUE_MODE==='proj'){
+    deals=ledger.concat(prog);
+    note='전체 상장 가정 · 납입완료('+ledger.length+') + 증권신고서 제출딜('+prog.length+') 전체 상장 가정 · 확정 전 밴드하단·확정 후 확정 기준';
+  } else {
+    deals=ledger;
+    note='현재 · 납입일 기준 누적('+ledger.length+'건)';
+  }
+  var L=aggLeague(deals);
+  function rank(key){ return L.slice().sort(function(a,b){return (b[key]||0)-(a[key]||0);}).map(function(r,i){ return Object.assign({순위:i+1}, r); }); }
+  var totAmt=L.reduce(function(s,r){return s+(r.인수금액||0);},0);
+  var amtRows=rank('인수금액').map(function(r){ return Object.assign({}, r, {점유율:(totAmt?(r.인수금액/totAmt*100):0).toFixed(1)+'%'}); });
+  var h='<div class="note">FY26 · '+note+' · 스팩·리츠 포함 · 단위 억원</div>';
+  h+='<div class="sec">1. 공모금액(인수금액) 순위</div>'+tbl(amtRows, RANK_AMT);
+  h+='<div class="sec">2. 인수수수료 순위</div>'+tbl(rank('인수수수료'), RANK_FEE);
+  h+='<div class="sec">3. 상장 건수 순위</div>'+tbl(rank('건수'), RANK_CNT);
+  box.innerHTML=h;
+}
 function unlockSecret(){
   var box=document.getElementById('t3secret');
   var pw=(document.getElementById('t3pw')||{}).value||'';
   if(pw!=='1111*'){ box.innerHTML='<div class="note" style="color:var(--red)">비밀번호가 올바르지 않습니다.</div>'; return; }
-  var L=(D.league||[]).slice();
-  function rank(key){ return L.slice().sort(function(a,b){return (b[key]||0)-(a[key]||0);}).map(function(r,i){ return Object.assign({순위:i+1}, r); }); }
-  var totAmt=L.reduce(function(s,r){return s+(r.인수금액||0);},0);
-  var amtRows=rank('인수금액').map(function(r){ return Object.assign({}, r, {점유율:(totAmt?(r.인수금액/totAmt*100):0).toFixed(1)+'%'}); });
-  var h='<div class="note">FY26 · 납입일 기준 누적 · 리그 검증 · 단위 억원 · 스팩·리츠 포함</div>';
-  h+='<div class="sec">1. 공모금액(인수금액) 순위</div>'+tbl(amtRows, RANK_AMT);
-  h+='<div class="sec">2. 인수수수료 순위</div>'+tbl(rank('인수수수료'), RANK_FEE);
-  h+='<div class="sec">3. 상장 건수 순위</div>'+tbl(rank('건수'), RANK_CNT);
+  var h='<div class="ctrl">';
+  h+='<div class="seg">'
+    +'<button class="segbtn active" data-lg="current">현재(납입 기준)</button>'
+    +'<button class="segbtn" data-lg="asof">기준일 조회</button>'
+    +'<button class="segbtn" data-lg="proj">전체 상장 가정</button></div>';
+  h+='<span id="lgdatewrap" style="display:none"><label>기준일</label> '
+    +'<input type="date" id="lgdate" class="dt" value="'+isoAsof()+'"></span>';
+  h+='</div>';
+  h+='<div id="t3lg"></div>';
   h+='<div class="sec">4. RAW 통합집계 원본</div>';
   h+='<a href="IPO_Rawdata_master.xlsx" download class="btn-dl" style="display:inline-block;margin-right:8px;text-decoration:none">⬇ RAW 통합집계 (코스닥·유가·리그24·25·26)</a>';
   h+='<button class="btn-dl" id="dlLedger" style="margin-left:0">⬇ 트랙레코드 원장</button>';
   box.innerHTML=h;
+  box.querySelectorAll('.seg .segbtn').forEach(function(b){
+    b.onclick=function(){
+      box.querySelectorAll('.seg .segbtn').forEach(function(x){ x.classList.remove('active'); });
+      b.classList.add('active'); LEAGUE_MODE=b.dataset.lg;
+      document.getElementById('lgdatewrap').style.display=(LEAGUE_MODE==='asof')?'':'none';
+      renderLeague();
+    };
+  });
+  var ld=document.getElementById('lgdate'); if(ld) ld.addEventListener('change', renderLeague);
+  renderLeague();
   var dl=document.getElementById('dlLedger'); if(dl) dl.onclick=downloadLedger;
 }
 function downloadLedger(){
@@ -2064,11 +2124,64 @@ def build_dashboard(kind_data, web, kind_master=None):
         except Exception as e:
             print(f"  [경고] 원장 로드 실패: {e}")
 
+    # ── 리그 as-of 기준일 부여 ──────────────────────────────────────────
+    # 직원 집계는 '납입일 기준'. 딜원장엔 납입일이 일부만 있고 상장일은 전부 있으므로,
+    # 납입일이 없으면 상장일 - 4영업일(≈납입일)을 as-of 기준일로 채운다.
+    def _minus_bizdays(iso, n=4):
+        try:
+            y, m, d = map(int, iso[:10].split("-"))
+            cur = datetime.date(y, m, d)
+        except Exception:
+            return iso[:10] if iso else ""
+        cnt = 0
+        while cnt < n:
+            cur -= datetime.timedelta(days=1)
+            if cur.weekday() < 5:      # 주말 제외(공휴일은 근사 반영 안 함)
+                cnt += 1
+        return cur.isoformat()
+    for d in ledger:
+        pay = (d.get("납입일") or "").strip()
+        d["_asof"] = pay or _minus_bizdays(d.get("상장일", ""))
+
+    # ── 투영(전체 상장 가정) 원장 ───────────────────────────────────────
+    # '증권신고서 제출' 상태의 공모 진행 딜을 '모두 상장한다고 가정'해 리그에 더한다.
+    # 인수인상세(신고서 기준: 최초·정정=밴드하단, 발행조건확정=확정)를 딜원장과 같은
+    # 스키마로 변환한다. 이미 납입완료(딜원장)된 딜은 중복 제외.
+    prog_ledger = []
+    try:
+        _om = json.load(open(OFFERING_JSON, encoding="utf-8")) if os.path.exists(OFFERING_JSON) else {}
+        _have = {_norm_name(d.get("업체", "")) for d in ledger}
+        _SUBMITTED = ("최초", "정정", "발행조건확정", "청약완료·상장대기")
+        for nm, rec in _om.items():
+            if _norm_name(nm) in _have:
+                continue
+            if str(rec.get("상태", "")).strip() not in _SUBMITTED:
+                continue
+            uw = rec.get("인수인상세") or []
+            if not uw:
+                continue
+            is_spac = bool(re.search(r"스팩|스펙|기업인수목적", nm))
+            total = round(sum(u.get("인수금액", 0) for u in uw), 2)
+            ui = []
+            for u in uw:
+                share = (u.get("인수금액", 0) / total) if total else 0
+                chung = 0.0 if is_spac else round(total * 0.75 * 0.01 * share, 3)
+                fee = u.get("인수대가", 0) or 0
+                ui.append({"증권사": u.get("증권사", ""), "역할": u.get("역할", ""),
+                           "인수금액": u.get("인수금액", 0), "인수수수료": fee,
+                           "청약수수료": chung, "전체수수료": round(fee + chung, 3)})
+            prog_ledger.append({"업체": nm, "상태": rec.get("상태", ""),
+                                "기준": "확정" if rec.get("상태") == "발행조건확정" else "하단",
+                                "상장예정일": rec.get("상장예정일", ""),
+                                "발행금액": total, "인수인": ui})
+    except Exception as e:
+        print(f"  [경고] 투영 원장 생성 실패(무시): {e}")
+
     DATA = {"asof": kind_data["asof"], "year": kind_data["year"],
             "screening": {k: scr(v) for k, v in kind_data["tables"].items()},
             "listed": listed, "prog": prog, "monthly": monthly, "share": share,
             "listed_mon": listed_mon, "approval": approval, "yc": yc,
-            "league": league, "ledger": ledger}
+            "league": league, "ledger": ledger, "prog_ledger": prog_ledger}
     html = (DASH_TEMPLATE
             .replace("__DATA__", json.dumps(DATA, ensure_ascii=False))
             .replace("__COMMENT_API__", json.dumps(COMMENT_API)))
