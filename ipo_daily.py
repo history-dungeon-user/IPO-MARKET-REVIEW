@@ -761,6 +761,13 @@ def collect_kind():
                     {"상태": cur, "시각": now, "심사결과": rec["심사결과"]}]
                 it["상태"], it["결과확정일"], it["심사결과"] = cur, rec["결과확정일"], rec["심사결과"]
                 changed.append(f"상태변경\t{rec['청구일']}\t{rec['회사명']}\t-> {rec['심사결과']}")
+            # KIND가 '심사승인' 표기 직후엔 결과확정일 칸을 잠시 비워두는 경우가 있다.
+            # 그 순간에 감지하면 결과확정일이 공란으로 굳고, 이후 심사결과가 안 바뀌어
+            # 위 조건에 안 걸려 영영 안 채워진다(글로벌테크놀로지 7/20 사례).
+            # → 심사결과는 그대로여도, 비어있던 결과확정일이 이제 채워졌으면 반영한다.
+            elif not (it.get("결과확정일") or "").strip() and (rec.get("결과확정일") or "").strip():
+                it["결과확정일"] = rec["결과확정일"]
+                changed.append(f"결과확정일보정\t{rec['청구일']}\t{rec['회사명']}\t{rec['결과확정일']}")
     kw.save_json(kw.MASTER, master)
 
     fin = kw.load_json(kw.FINDATA, {})
@@ -769,7 +776,21 @@ def collect_kind():
 
     def result_date(rec):
         d = (rec.get("결과확정일") or "").strip()
-        return d or kw.DATE_OVERRIDE.get(kw.fkey(rec["회사명"], rec["청구일"]), "")
+        if d:
+            return d
+        ov = kw.DATE_OVERRIDE.get(kw.fkey(rec["회사명"], rec["청구일"]), "")
+        if ov:
+            return ov
+        # KIND가 결과확정일을 비운 채 심사결과만 '승인/철회'로 표기하면, 위 필터
+        # (결과확정일이 연도로 시작) 때문에 승인 탭에서 통째로 사라진다(글로벌테크놀로지).
+        # → 우리가 상태변경(승인/철회)을 감지한 시각을 대체 결과일로 사용해 노출을 보장한다.
+        #   (KIND가 나중에 실제 결과확정일을 채우면 위 보정 로직이 진짜 값으로 덮어쓴다.)
+        it = store.get(f"{rec['회사명']}||{rec['청구일']}")
+        if it:
+            for h in reversed(it.get("상태변경이력", [])):
+                if h.get("심사결과"):
+                    return (h.get("시각") or "")[:10]
+        return ""
 
     t_apply, t_appr, t_drop, need = [], [], [], []
     for rec in fresh:
