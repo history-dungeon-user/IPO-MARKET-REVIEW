@@ -262,6 +262,117 @@ def resolve_corp_codes(names, corp_map):
     return corp_map
 
 
+# ════════════════════════════════════════════════════════════════════
+# 상장 후 주가 추이 수집 (네이버 금융 일별시세)
+#   · GitHub Actions(클라우드)에서 실행되므로 사용자 PC 전원과 무관하게 동작.
+#   · 종목코드는 corpCode.xml(stock_code)에서, 없으면 스킵.
+#   · 확정공모가 대비 시초가·상장일종가·+1주/1달/3달·현재가 등락률 계산.
+#   · price_history.json 에 캐시 → 조회 실패 시 캐시 사용(파이프라인 중단 없음).
+# ════════════════════════════════════════════════════════════════════
+PRICE_JSON = os.path.join(BASE, "price_history.json")
+
+def _naver_daily(stock_code, start_yyyymmdd, end_yyyymmdd):
+    """네이버 금융 siseJson → [(YYYYMMDD, open, high, low, close, vol), ...]"""
+    url = ("https://api.finance.naver.com/siseJson.naver"
+           f"?symbol={stock_code}&requestType=1"
+           f"&startTime={start_yyyymmdd}&endTime={end_yyyymmdd}&timeframe=day")
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0",
+                     "Referer": "https://finance.naver.com/"}, timeout=20)
+    rows = []
+    for m in re.finditer(
+            r"\[\s*[\"']?(\d{8})[\"']?\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*"
+            r"([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", r.text):
+        d, o, h, l, c, v = m.groups()
+        rows.append((d, float(o), float(h), float(l), float(c), float(v)))
+    rows.sort(key=lambda x: x[0])
+    return rows
+
+def _price_metrics(rows, listing_date, ipo_price):
+    if not rows or not ipo_price:
+        return {}
+    ld = listing_date.replace("-", "")
+    y, mo, d = int(listing_date[:4]), int(listing_date[5:7]), int(listing_date[8:10])
+    base = datetime.date(y, mo, d)
+    def after(target):
+        for r in rows:
+            if r[0] >= target:
+                return r
+        return None
+    def pct(v):
+        return round((v / ipo_price - 1) * 100, 1) if ipo_price else None
+    out = {}
+    d0 = after(ld)
+    if d0:
+        out["시초가"] = int(d0[1]); out["시초등락"] = pct(d0[1])
+        out["상장종가"] = int(d0[4]); out["상장종가등락"] = pct(d0[4])
+    for label, days in (("1주", 7), ("1달", 30), ("3달", 91)):
+        t = after((base + datetime.timedelta(days=days)).strftime("%Y%m%d"))
+        # 아직 그 시점이 도래하지 않았으면(미래) 비운다
+        if t and t[0] <= datetime.date.today().strftime("%Y%m%d"):
+            out[label] = int(t[4]); out[label + "등락"] = pct(t[4])
+    out["현재가"] = int(rows[-1][4]); out["현재등락"] = pct(rows[-1][4])
+    out["기준일"] = rows[-1][0]
+    return out
+
+def collect_prices(seed_rows, corp_idx):
+    """상장완료(일반 신규상장) 종목의 상장 후 주가지표를 수집/갱신 → price_history.json.
+       스팩·스팩합병·확정공모가 없는 건은 제외. 실패는 캐시로 대체하고 절대 중단하지 않음."""
+    cache = {}
+    if os.path.exists(PRICE_JSON):
+        try: cache = json.load(open(PRICE_JSON, encoding="utf-8"))
+        except Exception: cache = {}
+
+    # 회사명 → stock_code (상장코드 보유·최근 수정 우선)
+    def _scode(nm):
+        cands = corp_idx.get(nm) or []
+        if not cands:
+            flat = {}
+            for cn, cl in corp_idx.items():
+                flat.setdefault(_corp_key(cn), []).extend(cl)
+            cands = flat.get(_corp_key(nm), [])
+        cands = [c for c in cands if c[1] and c[1].strip()]   # 상장코드 있는 것만
+        cands.sort(key=lambda c: -int(re.sub(r"\D", "", c[2]) or 0))
+        return cands[0][1] if cands else ""
+
+    def _iprice(x):
+        s = str(x.get("확정공모가", "") or "").replace(",", "")
+        m = re.match(r"(\d+)", s)
+        return int(m.group(1)) if m else 0
+
+    today = datetime.date.today().strftime("%Y%m%d")
+    out, done, fail = dict(cache), 0, 0
+    for x in seed_rows:
+        nm = x.get("기업명", "")
+        ld = str(x.get("상장일", "") or "")
+        if not ld.startswith("20"):
+            continue
+        if re.search(r"스팩|스펙|기업인수목적", nm) or "스팩합병" in str(x.get("진행상태", "")):
+            continue
+        ip = _iprice(x)
+        if not ip:                        # 확정공모가 없으면 등락 계산 불가
+            continue
+        code = _scode(nm)
+        if not code:
+            continue
+        try:
+            rows = _naver_daily(code, ld.replace("-", ""), today)
+            if not rows:
+                raise RuntimeError("빈 시세")
+            met = _price_metrics(rows, ld[:10], ip)
+            met.update({"기업명": nm, "종목코드": code, "상장일": ld[:10], "확정공모가": ip})
+            out[code] = met; done += 1
+        except Exception as e:
+            fail += 1
+            if code not in out:
+                print(f"  [주가 경고] {nm}({code}): {e}")
+    try:
+        json.dump(out, open(PRICE_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    except Exception as e:
+        print(f"[주가] 저장 실패(무시): {e}")
+    print(f"[주가] 갱신 {done}종목 · 실패 {fail} · 누적 {len(out)}")
+    return out
+
+
 def latest_filing(filings):
     """최신 증권신고서 1건 + 상태 판별 + 실적보고서 여부"""
     reg, perf = None, None
@@ -453,6 +564,24 @@ def extract_perf_fee(t):
     m = re.search(r"(성과수수료[^.。\n]{0,140})", t)
     if m: return re.sub(r"\s+", " ", m.group(1)).strip()[:140]
     return "없음"
+
+def extract_business(t):
+    """신고서 '사업의 개요'에서 주요 사업내용 한두 문장 발췌(리테일 안내용).
+       표·머리글을 건너뛰고 실제 서술 문장만 취한다. 실패 시 빈 문자열."""
+    m = re.search(r"1\.\s*사업의\s*개요(.{0,4000})", t, re.S)
+    seg = m.group(1) if m else t[:4000]
+    # 회사는/당사는/동사는 등으로 시작하는 서술 문장을 우선
+    cand = re.search(r"((?:당사|회사|동사|본|㈜)[^\n|]{20,200}?(?:습니다|합니다|입니다|있습니다)\.?)", seg)
+    if not cand:
+        # 아무 서술 문장이나(한글 위주, 표 셀이 아닌 긴 문장)
+        for line in seg.split("\n"):
+            ln = line.strip()
+            if "|" not in ln and len(ln) >= 25 and re.search(r"[가-힣].*(?:니다|다\.)", ln):
+                cand = re.match(r"(.{20,220})", ln); break
+    if not cand:
+        return ""
+    s = re.sub(r"\s+", " ", cand.group(1)).strip()
+    return s[:200]
 
 def extract_underwriters(t):
     """인수인 표 → [{증권사,역할,인수금액(억),인수대가(억)}] · 증권사별 정정후(마지막) 유지"""
@@ -710,6 +839,8 @@ def track_offerings(approved_names):
                 # 투영(전체 상장 가정) 리그 계산에 쓴다. 신고서 기준값이라
                 # 최초·정정 = 밴드 하단 기준, 발행조건확정 = 확정 기준으로 자동 반영된다.
                 if uw: rec["인수인상세"] = uw
+                biz = extract_business(text)
+                if biz: rec["사업개요"] = biz
                 # 확정공모가는 [발행조건확정] 신고서에서만 유효.
                 # 그 전(최초/정정)엔 "확정공모가액…밴드 하단 기준" 문구를 오인 추출하므로 비운다.
                 if status != "발행조건확정":
@@ -1388,6 +1519,8 @@ DASH_TEMPLATE = """<!DOCTYPE html>
     <button data-t="t1" class="active">예심</button>
     <button data-t="t2">공모 · 상장</button>
     <button data-t="t3">분석</button>
+    <button data-t="t5">IPO 담당자</button>
+    <button data-t="t6">리테일</button>
     <button data-t="t4">심사 코멘트</button>
   </div>
   <div class="pane active" id="t1">
@@ -1430,6 +1563,8 @@ DASH_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id="t3body"></div>
   </div>
+  <div class="pane" id="t5"><div id="t5body"></div></div>
+  <div class="pane" id="t6"><div id="t6body"></div></div>
   <div class="pane" id="t4">
     <div id="t4gate">
       <div class="sec">미승인 · 철회 사유 공유</div>
@@ -1594,6 +1729,82 @@ function renderT3(){
   var ub=document.getElementById('t3unlock'); if(ub) ub.onclick=unlockSecret;
   var pw=document.getElementById('t3pw'); if(pw) pw.addEventListener('keydown',function(e){ if(e.key==='Enter') unlockSecret(); });
   EXPORT.t3 = {sheets:[{name:'월별상장',cols:T1,rows:D.listed_mon||[]},{name:'예심승인율',cols:T2,rows:D.approval||[]},{name:'수요예측청약',cols:T3,rows:D.yc||[]}], fname:'분석_'+isoAsof()+'.xlsx'};
+}
+
+/* ── 주가 등락 표시 (한국 관례: 상승 빨강 · 하락 파랑) ── */
+function pctHTML(v){
+  if(v===null||v===undefined||v==='') return '<span class="dash">–</span>';
+  var n=Number(v); var c = n>0?'#C0392B':(n<0?'#1F5FA8':'#6B7280');
+  var s = (n>0?'+':'')+n.toFixed(1)+'%';
+  return '<span style="color:'+c+';font-weight:600">'+s+'</span>';
+}
+function won(v){ if(v===null||v===undefined||v==='') return '<span class="dash">–</span>';
+  var n=Number(String(v).replace(/,/g,'')); return isNaN(n)?String(v):n.toLocaleString(); }
+/* 주가추이 행 → 표시용(가격+등락 한 칸) */
+function priceRows(){
+  return (D.prices||[]).map(function(p){
+    return {
+      기업명:p.기업명||'', 상장일:p.상장일||'', 종목코드:p.종목코드||'',
+      확정공모가: won(p.확정공모가),
+      시초: p.시초가!=null ? (won(p.시초가)+' '+pctHTML(p.시초등락)) : '<span class="dash">–</span>',
+      상장종가: p.상장종가!=null ? (won(p.상장종가)+' '+pctHTML(p.상장종가등락)) : '<span class="dash">–</span>',
+      d7: p['1주']!=null ? (won(p['1주'])+' '+pctHTML(p['1주등락'])) : '<span class="dash">–</span>',
+      d30: p['1달']!=null ? (won(p['1달'])+' '+pctHTML(p['1달등락'])) : '<span class="dash">–</span>',
+      d90: p['3달']!=null ? (won(p['3달'])+' '+pctHTML(p['3달등락'])) : '<span class="dash">–</span>',
+      현재: p.현재가!=null ? (won(p.현재가)+' '+pctHTML(p.현재등락)) : '<span class="dash">–</span>'
+    };
+  });
+}
+/* 엑셀 export용 평문(가격/등락 분리) */
+function priceExport(){
+  return (D.prices||[]).map(function(p){ return {
+    기업명:p.기업명||'', 상장일:p.상장일||'', 종목코드:p.종목코드||'', 확정공모가:p.확정공모가||'',
+    시초가:p.시초가||'', 시초등락:p.시초등락||'', 상장종가:p.상장종가||'', 상장종가등락:p.상장종가등락||'',
+    '1주':p['1주']||'', '1주등락':p['1주등락']||'', '1달':p['1달']||'', '1달등락':p['1달등락']||'',
+    '3달':p['3달']||'', '3달등락':p['3달등락']||'', 현재가:p.현재가||'', 현재등락:p.현재등락||'' }; });
+}
+var PRICE_XLS=[["기업명","기업명"],["상장일","상장일"],["종목코드","종목코드"],["확정공모가","확정공모가"],
+  ["시초가","시초가"],["시초등락","시초_공모가比%"],["상장종가","상장일종가"],["상장종가등락","상장종가_공모가比%"],
+  ["1주","+1주종가"],["1주등락","+1주_%"],["1달","+1달종가"],["1달등락","+1달_%"],
+  ["3달","+3달종가"],["3달등락","+3달_%"],["현재가","현재가"],["현재등락","현재_%"]];
+var YOY=[["연도","연도"],["상장건수","신규상장(건)",1],["공모금액","공모금액(억)",1],["YTD건수","동기간 상장(건)",1],["YTD공모금액","동기간 공모금액(억)",1]];
+var PRICE=[["기업명","기업명"],["상장일","상장일"],["확정공모가","확정공모가"],
+  ["시초","시초가(공모가比)"],["상장종가","상장일 종가(공모가比)"],
+  ["d7","+1주(공모가比)"],["d30","+1달(공모가比)"],["d90","+3달(공모가比)"],["현재","현재가(공모가比)"]];
+var PIPE=[["회사명","기업명"],["상태","상태"],["업종","업종"],["밴드","공모가밴드(원)"],
+  ["확정공모가","확정공모가(원)"],["공모금액","공모금액(원)",1],["멀티플","밸류 멀티플"],
+  ["수요예측기간","수요예측기간"],["청약기간","청약기간"],["상장예정일","상장예정일"],
+  ["대표주관","주관사"],["사업개요","주요 사업내용"]];
+/* ── IPO 담당자 탭 ── */
+function renderT5(){
+  var h='<div class="ctrl"><button class="btn-dl" id="dl5">⬇ 엑셀</button></div>';
+  h+='<div class="sec">① 연도별(YoY) 신규상장 · 공모규모 <span class="cnt">(코스닥+유가 · 상장일 기준 · 동기간=올해 최신월까지)</span></div>';
+  h+=tbl(D.yoy||[], YOY);
+  h+='<div class="note">※ 동기간(YTD)은 각 연도 1월~올해 최신 상장월까지로 정렬해 같은 기간끼리 비교.</div>';
+  h+='<div class="sec">② 상장예비심사 승인율 <span class="cnt">(26년 · 스팩 제외 병기)</span></div>';
+  h+=tbl(D.approval||[], T2);
+  h+='<div class="note">※ 예심 청구·결과 데이터는 26년부터 집계(24·25년 예심 원천데이터 미보유).</div>';
+  h+='<div class="sec">③ 신규 상장기업 상장 후 주가 추이 <span class="cnt">('+(D.prices||[]).length+'종목 · 확정공모가 대비 등락)</span></div>';
+  h+=tbl(priceRows(), PRICE, {tall:1, freeze:1});
+  h+='<div class="note">※ 시초가·종가는 네이버 금융 일별시세 기준. 등락률 = 확정공모가 대비. '
+    +'상승 <span style="color:#C0392B">빨강</span>·하락 <span style="color:#1F5FA8">파랑</span>. '
+    +'해당 시점 미도래·스팩·공모가 미확정 종목은 표시 제외.</div>';
+  document.getElementById('t5body').innerHTML=h;
+  EXPORT.t5={sheets:[{name:'YoY',cols:YOY,rows:D.yoy||[]},{name:'승인율',cols:T2,rows:D.approval||[]},{name:'주가추이',cols:PRICE_XLS,rows:priceExport()}], fname:'IPO담당자_'+isoAsof()+'.xlsx'};
+  var b=document.getElementById('dl5'); if(b) b.onclick=function(){ download('t5'); };
+}
+/* ── 리테일 탭 ── */
+function renderT6(){
+  var h='<div class="ctrl"><button class="btn-dl" id="dl6">⬇ 엑셀</button></div>';
+  h+='<div class="sec">① 상장 예정 기업 <span class="cnt">(증권신고서 제출 · '+(D.pipeline||[]).length+'개사 · 청약 임박순)</span></div>';
+  h+=tbl(D.pipeline||[], PIPE, {tall:1, freeze:1});
+  h+='<div class="note">※ 확정공모가 미정은 밴드(희망공모가) 기준. 일정·가격은 정정신고서에 따라 변동될 수 있음.</div>';
+  h+='<div class="sec">② 최근 상장기업 주가 추이 <span class="cnt">('+(D.prices||[]).length+'종목 · 확정공모가 대비)</span></div>';
+  h+=tbl(priceRows(), PRICE, {tall:1, freeze:1});
+  h+='<div class="note">※ 공모주 청약 참고용. 과거 수익률이 미래 수익을 보장하지 않습니다. 출처: 네이버 금융.</div>';
+  document.getElementById('t6body').innerHTML=h;
+  EXPORT.t6={sheets:[{name:'상장예정',cols:PIPE,rows:D.pipeline||[]},{name:'주가추이',cols:PRICE_XLS,rows:priceExport()}], fname:'리테일_'+isoAsof()+'.xlsx'};
+  var b=document.getElementById('dl6'); if(b) b.onclick=function(){ download('t6'); };
 }
 // 딜 목록 → 주관사 집계 (파이썬 _recalc_league 와 동일 규칙)
 function aggLeague(deals){
@@ -1904,6 +2115,8 @@ function _safe(label, fn){ try{ fn(); }catch(e){ console.error('[init] '+label+'
 _safe('renderT1', renderT1);
 _safe('renderT2', renderT2);
 _safe('renderT3', renderT3);
+_safe('renderT5', renderT5);
+_safe('renderT6', renderT6);
 
 _safe('탭 전환', function(){
   document.querySelectorAll('.tabs button').forEach(function(b){
@@ -2180,11 +2393,93 @@ def build_dashboard(kind_data, web, kind_master=None):
     except Exception as e:
         print(f"  [경고] 투영 원장 생성 실패(무시): {e}")
 
+    # ── IPO 담당자 탭: 연도별(YoY) 신규상장·공모규모 ────────────────────
+    # RAW master(코스닥+유가) 상장일·공모금액(천원)에서 24/25/26 집계.
+    # 연간 누계 + 동기간(YTD: 26년 최신월까지) 정렬 비교를 함께 제공한다.
+    yoy = []
+    try:
+        from openpyxl import load_workbook as _lwb
+        _wb = _lwb(RAW_XLSX, data_only=True, read_only=True)
+        cur_mo = int((kind_data.get("asof") or "2026-12")[5:7]) if len(str(kind_data.get("asof",""))) >= 7 else 12
+        agg = {y: {"건수": 0, "금액": 0.0, "ytd건수": 0, "ytd금액": 0.0} for y in (2024, 2025, 2026)}
+        for sn in ("코스닥", "유가"):
+            if sn not in _wb.sheetnames: continue
+            ws = _wb[sn]; hdr = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+            try: i_ld = hdr.index("상장일"); i_am = hdr.index("공모금액(천원)")
+            except ValueError: continue
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                ld = row[i_ld]
+                if not ld: continue
+                s = str(ld)[:10]; mm = re.match(r"(\d{4})[-/.](\d{1,2})", s)
+                if mm: yy, mo = int(mm.group(1)), int(mm.group(2))
+                else:
+                    try: yy, mo = ld.year, ld.month
+                    except Exception: continue
+                if yy not in agg: continue
+                amt_eok = (float(row[i_am] or 0) / 1e5)   # 천원 → 억원
+                agg[yy]["건수"] += 1; agg[yy]["금액"] += amt_eok
+                if mo <= cur_mo:
+                    agg[yy]["ytd건수"] += 1; agg[yy]["ytd금액"] += amt_eok
+        for y in (2024, 2025, 2026):
+            a = agg[y]
+            yoy.append({"연도": f"{y}년", "상장건수": a["건수"],
+                        "공모금액": f'{a["금액"]:,.0f}',
+                        "YTD건수": a["ytd건수"], "YTD공모금액": f'{a["ytd금액"]:,.0f}'})
+        _wb.close()
+    except Exception as e:
+        print(f"  [경고] YoY 집계 실패(무시): {e}")
+
+    # ── 리테일 탭: 상장예정(증권신고서 제출) 기업 상세 ──────────────────
+    # offering_master + 예심 재무(업종). 확정 전은 밴드, 확정 후는 확정가 기준.
+    pipeline = []
+    try:
+        _om = json.load(open(OFFERING_JSON, encoding="utf-8")) if os.path.exists(OFFERING_JSON) else {}
+        _fin = {}
+        try:
+            import kind_weekly as _kw
+            _finraw = _kw.load_json(_kw.FINDATA, {})
+            for k, v in _finraw.items():
+                nm0 = k.split("|")[0]
+                _fin[_norm_name(nm0)] = v.get("업종", "")
+        except Exception: pass
+        _SUB = ("최초", "정정", "발행조건확정", "청약완료·상장대기")
+        _seed_names = {_norm_name(x["기업명"]) for x in _load_listing_seed()
+                       if str(x.get("상장일", "")).startswith("20")}
+        for nm, rec in _om.items():
+            if str(rec.get("상태", "")).strip() not in _SUB: continue
+            if _norm_name(nm) in _seed_names: continue        # 이미 상장 → 제외
+            conf = str(rec.get("확정공모가", "") or "").strip()
+            pipeline.append({
+                "회사명": nm, "상태": rec.get("상태", ""),
+                "업종": _fin.get(_norm_name(nm), ""),
+                "밴드": rec.get("밴드", ""),
+                "확정공모가": _comma(conf) if conf else "미확정",
+                "공모금액": _won(rec.get("공모금액", "")),
+                "멀티플": rec.get("멀티플", ""),
+                "수요예측기간": _fmt_sub(rec.get("수요예측기간", "")),
+                "청약기간": _fmt_sub(rec.get("청약일정", "")),
+                "상장예정일": rec.get("상장예정일", ""),
+                "대표주관": _prog_uw(rec),
+                "사업개요": rec.get("사업개요", "")})
+        _order = {"발행조건확정": 0, "청약완료·상장대기": 1, "정정": 2, "최초": 3}
+        pipeline.sort(key=lambda x: (_order.get(x["상태"], 5), x.get("청약기간", "") or "zz"))
+    except Exception as e:
+        print(f"  [경고] 파이프라인 생성 실패(무시): {e}")
+
+    # ── 공통: 상장 후 주가 추이 ─────────────────────────────────────────
+    prices = []
+    try:
+        _ph = json.load(open(PRICE_JSON, encoding="utf-8")) if os.path.exists(PRICE_JSON) else {}
+        prices = sorted(_ph.values(), key=lambda p: p.get("상장일", ""), reverse=True)
+    except Exception as e:
+        print(f"  [경고] 주가 로드 실패(무시): {e}")
+
     DATA = {"asof": kind_data["asof"], "year": kind_data["year"],
             "screening": {k: scr(v) for k, v in kind_data["tables"].items()},
             "listed": listed, "prog": prog, "monthly": monthly, "share": share,
             "listed_mon": listed_mon, "approval": approval, "yc": yc,
-            "league": league, "ledger": ledger, "prog_ledger": prog_ledger}
+            "league": league, "ledger": ledger, "prog_ledger": prog_ledger,
+            "yoy": yoy, "pipeline": pipeline, "prices": prices}
     html = (DASH_TEMPLATE
             .replace("__DATA__", json.dumps(DATA, ensure_ascii=False))
             .replace("__COMMENT_API__", json.dumps(COMMENT_API)))
@@ -2410,6 +2705,15 @@ def main():
         enrich_listed_from_dart(listings, corp_map)
     except Exception as e:
         print(f"[ENRICH] 실패(무시): {e}")
+
+    # [3-d] 상장 후 주가 추이 수집 (네이버 금융 · 클라우드에서 실행)
+    try:
+        if DART_API_KEY:
+            collect_prices(_load_listing_seed(), dart_corp_code_index())
+        else:
+            print("[주가] DART 키 없음 → 종목코드 확보 불가, 주가 수집 생략")
+    except Exception as e:
+        print(f"[주가] 수집 실패(무시, 캐시 사용): {e}")
 
     # [4] 3탭 엑셀
     web = build_excel(kind_data, kind_master, offering, listings)
