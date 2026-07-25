@@ -69,6 +69,10 @@ TODAY = datetime.date.today().strftime("%Y%m%d")
 # 내용은 브라우저에서 암호화된 뒤 전송되므로, 이 URL이 노출돼도 평문은 새지 않는다.
 COMMENT_API = ""
 
+# 24·25년 월별 예심 승인율 (업로드 원천 "예비심사기업 24이후"에서 사전 집계)
+# 청구일 24년 이후 표본 기준 · 결과확정일 월별 · 스팩제외 병기
+HIST_APPROVAL = json.loads(r'''{"2024":{"2":{"총승인":6,"스팩제외승인":0,"철회미승인":0,"승인율":100.0,"스팩제외승인율":null},"3":{"총승인":1,"스팩제외승인":0,"철회미승인":1,"승인율":50.0,"스팩제외승인율":0.0},"4":{"총승인":6,"스팩제외승인":0,"철회미승인":1,"승인율":85.7,"스팩제외승인율":null},"5":{"총승인":7,"스팩제외승인":4,"철회미승인":2,"승인율":77.8,"스팩제외승인율":66.7},"6":{"총승인":11,"스팩제외승인":7,"철회미승인":2,"승인율":84.6,"스팩제외승인율":87.5},"7":{"총승인":9,"스팩제외승인":8,"철회미승인":3,"승인율":75.0,"스팩제외승인율":72.7},"8":{"총승인":21,"스팩제외승인":17,"철회미승인":3,"승인율":87.5,"스팩제외승인율":85.0},"9":{"총승인":15,"스팩제외승인":13,"철회미승인":4,"승인율":78.9,"스팩제외승인율":76.5},"10":{"총승인":11,"스팩제외승인":8,"철회미승인":10,"승인율":52.4,"스팩제외승인율":44.4},"11":{"총승인":14,"스팩제외승인":12,"철회미승인":7,"승인율":66.7,"스팩제외승인율":63.2},"12":{"총승인":9,"스팩제외승인":9,"철회미승인":5,"승인율":64.3,"스팩제외승인율":64.3}},"2025":{"1":{"총승인":10,"스팩제외승인":8,"철회미승인":1,"승인율":90.9,"스팩제외승인율":88.9},"2":{"총승인":0,"스팩제외승인":0,"철회미승인":10,"승인율":0.0,"스팩제외승인율":0.0},"3":{"총승인":5,"스팩제외승인":5,"철회미승인":2,"승인율":71.4,"스팩제외승인율":71.4},"4":{"총승인":9,"스팩제외승인":9,"철회미승인":4,"승인율":69.2,"스팩제외승인율":75.0},"5":{"총승인":5,"스팩제외승인":3,"철회미승인":2,"승인율":71.4,"스팩제외승인율":60.0},"6":{"총승인":11,"스팩제외승인":7,"철회미승인":3,"승인율":78.6,"스팩제외승인율":70.0},"7":{"총승인":7,"스팩제외승인":6,"철회미승인":5,"승인율":58.3,"스팩제외승인율":60.0},"8":{"총승인":6,"스팩제외승인":3,"철회미승인":2,"승인율":75.0,"스팩제외승인율":60.0},"9":{"총승인":17,"스팩제외승인":16,"철회미승인":2,"승인율":89.5,"스팩제외승인율":88.9},"10":{"총승인":11,"스팩제외승인":3,"철회미승인":7,"승인율":61.1,"스팩제외승인율":42.9},"11":{"총승인":5,"스팩제외승인":1,"철회미승인":1,"승인율":83.3,"스팩제외승인율":50.0},"12":{"총승인":7,"스팩제외승인":7,"철회미승인":3,"승인율":70.0,"스팩제외승인율":70.0}}}''')
+
 
 # ════════════════════════════════════════════════════════════════════
 # [2] KIND 신규상장 페이지 (상장일 확정 소스)
@@ -581,7 +585,18 @@ def extract_business(t):
     if not cand:
         return ""
     s = re.sub(r"\s+", " ", cand.group(1)).strip()
-    return s[:200]
+    return _biz_concise(s)[:120]
+
+def _biz_concise(s):
+    """'당사는 …을 운영하고 있습니다.' → '… 운영' 식으로 간결화."""
+    s = re.sub(r"^(?:당사|회사|동사|본\s*회사|㈜[^\s]*|[가-힣A-Za-z0-9]+\s*㈜)\s*(?:는|은|이|가)?\s*", "", s).strip()
+    # 서술 어미를 명사형 동작으로 축약
+    s = re.sub(r"(을|를)?\s*(영위|운영|개발|제공|제조|생산|판매|공급|서비스)\s*(?:하고\s*있습니다|하고\s*있으며|하고\s*있는|합니다|하는)\.?\s*$",
+               lambda m: (m.group(1) or "") + " " + m.group(2), s).strip()
+    # 남은 일반 종결어미 제거
+    s = re.sub(r"(?:하고\s*있습니다|하고\s*있으며|입니다|습니다|합니다)\.?\s*$", "", s).strip()
+    s = re.sub(r"[.,\s]+$", "", s).strip()
+    return s
 
 def extract_underwriters(t):
     """인수인 표 → [{증권사,역할,인수금액(억),인수대가(억)}] · 증권사별 정정후(마지막) 유지"""
@@ -1518,9 +1533,8 @@ DASH_TEMPLATE = """<!DOCTYPE html>
   <div class="tabs">
     <button data-t="t1" class="active">예심</button>
     <button data-t="t2">공모 · 상장</button>
-    <button data-t="t3">분석</button>
-    <button data-t="t5">IPO 담당자</button>
-    <button data-t="t6">리테일</button>
+    <button data-t="t6">공모기업 정보</button>
+    <button data-t="t3">IPO 정보</button>
     <button data-t="t4">심사 코멘트</button>
   </div>
   <div class="pane active" id="t1">
@@ -1563,7 +1577,6 @@ DASH_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id="t3body"></div>
   </div>
-  <div class="pane" id="t5"><div id="t5body"></div></div>
   <div class="pane" id="t6"><div id="t6body"></div></div>
   <div class="pane" id="t4">
     <div id="t4gate">
@@ -1653,7 +1666,7 @@ function tbl(rows, cols, opts){
 /* ── 탭1 예심 ── */
 const SCR = [["일자","일자"],["회사명","회사명"],["시장","시장"],["상장유형","상장유형"],
   ["현황","현황"],["기준연도","기준연도"],["매출액","매출액(백만원)",1],["순이익","순이익(백만원)",1],
-  ["자기자본","자기자본(백만원)",1],["업종","업종"],["대표주관사","대표주관사"]];
+  ["자기자본","자기자본(백만원)",1],["업종","업종"],["대표주관사","주관사"]];
 function renderT1(){
   const q = (val('q')).trim(), from = val('t1from'), to = val('t1to');
   const blocks = [["신청","심사 신청(진행중)"],["승인","심사 승인"],["철회미승인","철회·미승인"]];
@@ -1715,20 +1728,15 @@ const T3 = [["연도","구분"],["월","월"],["참여평균","참여기관수 �
 const RANK_AMT = [["순위","순위",1],["증권사","증권사"],["건수","건수",1],["인수금액","인수금액(억)",1],["점유율","점유율"]];
 const RANK_FEE = [["순위","순위",1],["증권사","증권사"],["건수","건수",1],["인수수수료","인수수수료(억)",1]];
 const RANK_CNT = [["순위","순위",1],["증권사","증권사"],["건수","상장건수",1]];
+/* ── IPO 정보 탭 (전체 비밀번호) — 구 분석 + IPO담당자 통합 ── */
 function renderT3(){
-  let h = '<div class="sec">① 월별 상장기업 추이 <span class="cnt">(24·25년 코스닥+유가 시트 상장일 · 26년 상장완료 · 상장월 기준)</span></div>';
-  h += tbl(D.listed_mon||[], T1);
-  h += '<div class="sec">② 월별 예심 승인율 <span class="cnt">(26년 · 스팩 제외 병기)</span></div>';
-  h += tbl(D.approval||[], T2);
-  h += '<div class="sec">③ 수요예측 · 청약 현황 <span class="cnt">(26년 상장 월별 평균)</span></div>';
-  h += tbl(D.yc||[], T3, {totalKey:"합계"});
-  h += '<div class="sec">④ 추가 분석 데이터 <span class="cnt">(비밀번호 필요)</span></div>';
-  h += '<div class="ctrl"><label>비밀번호</label><input type="password" id="t3pw" class="dt" style="width:130px" autocomplete="off"><button class="preset" id="t3unlock">확인</button></div>';
-  h += '<div id="t3secret"></div>';
-  document.getElementById('t3body').innerHTML = h;
+  var h='<div class="sec">IPO 정보 <span class="cnt">(내부용 · 비밀번호 필요)</span></div>';
+  h+='<div class="note">연도별 신규상장·공모규모, 상장 후 주가 추이, 월별 예심 승인율, 수요예측·청약 현황, 주관사 리그테이블을 제공합니다.</div>';
+  h+='<div class="ctrl"><label>비밀번호</label><input type="password" id="t3pw" class="dt" style="width:130px" autocomplete="off"><button class="btn-pri" id="t3unlock">열기</button></div>';
+  h+='<div id="t3secret"></div>';
+  document.getElementById('t3body').innerHTML=h;
   var ub=document.getElementById('t3unlock'); if(ub) ub.onclick=unlockSecret;
   var pw=document.getElementById('t3pw'); if(pw) pw.addEventListener('keydown',function(e){ if(e.key==='Enter') unlockSecret(); });
-  EXPORT.t3 = {sheets:[{name:'월별상장',cols:T1,rows:D.listed_mon||[]},{name:'예심승인율',cols:T2,rows:D.approval||[]},{name:'수요예측청약',cols:T3,rows:D.yc||[]}], fname:'분석_'+isoAsof()+'.xlsx'};
 }
 
 /* ── 주가 등락 표시 (한국 관례: 상승 빨강 · 하락 파랑) ── */
@@ -1775,35 +1783,29 @@ var PIPE=[["회사명","기업명"],["상태","상태"],["업종","업종"],["�
   ["확정공모가","확정공모가(원)"],["공모금액","공모금액(원)",1],["멀티플","밸류 멀티플"],
   ["수요예측기간","수요예측기간"],["청약기간","청약기간"],["상장예정일","상장예정일"],
   ["대표주관","주관사"],["사업개요","주요 사업내용"]];
-/* ── IPO 담당자 탭 ── */
-function renderT5(){
-  var h='<div class="ctrl"><button class="btn-dl" id="dl5">⬇ 엑셀</button></div>';
-  h+='<div class="sec">① 연도별(YoY) 신규상장 · 공모규모 <span class="cnt">(코스닥+유가 · 상장일 기준 · 동기간=올해 최신월까지)</span></div>';
-  h+=tbl(D.yoy||[], YOY);
-  h+='<div class="note">※ 동기간(YTD)은 각 연도 1월~올해 최신 상장월까지로 정렬해 같은 기간끼리 비교.</div>';
-  h+='<div class="sec">② 상장예비심사 승인율 <span class="cnt">(26년 · 스팩 제외 병기)</span></div>';
-  h+=tbl(D.approval||[], T2);
-  h+='<div class="note">※ 예심 청구·결과 데이터는 26년부터 집계(24·25년 예심 원천데이터 미보유).</div>';
-  h+='<div class="sec">③ 신규 상장기업 상장 후 주가 추이 <span class="cnt">('+(D.prices||[]).length+'종목 · 확정공모가 대비 등락)</span></div>';
-  h+=tbl(priceRows(), PRICE, {tall:1, freeze:1});
-  h+='<div class="note">※ 시초가·종가는 네이버 금융 일별시세 기준. 등락률 = 확정공모가 대비. '
-    +'상승 <span style="color:#C0392B">빨강</span>·하락 <span style="color:#1F5FA8">파랑</span>. '
-    +'해당 시점 미도래·스팩·공모가 미확정 종목은 표시 제외.</div>';
-  document.getElementById('t5body').innerHTML=h;
-  EXPORT.t5={sheets:[{name:'YoY',cols:YOY,rows:D.yoy||[]},{name:'승인율',cols:T2,rows:D.approval||[]},{name:'주가추이',cols:PRICE_XLS,rows:priceExport()}], fname:'IPO담당자_'+isoAsof()+'.xlsx'};
-  var b=document.getElementById('dl5'); if(b) b.onclick=function(){ download('t5'); };
+/* 파이프라인 행 → 회사명에 증권신고서(DART) 링크 부착 */
+function pipelineRows(){
+  return (D.pipeline||[]).map(function(p){
+    var r=Object.assign({}, p);
+    if(p.접수번호){
+      r.회사명='<a href="https://dart.fss.or.kr/dsaf001/main.do?rcpNo='+p.접수번호
+        +'" target="_blank" rel="noopener" style="color:var(--navy);text-decoration:underline">'
+        +esc(p.회사명)+' <span style="font-size:11px">↗</span></a>';
+    }
+    return r;
+  });
 }
-/* ── 리테일 탭 ── */
+/* ── 공모기업 정보 탭(구 리테일) ── */
 function renderT6(){
   var h='<div class="ctrl"><button class="btn-dl" id="dl6">⬇ 엑셀</button></div>';
-  h+='<div class="sec">① 상장 예정 기업 <span class="cnt">(증권신고서 제출 · '+(D.pipeline||[]).length+'개사 · 청약 임박순)</span></div>';
-  h+=tbl(D.pipeline||[], PIPE, {tall:1, freeze:1});
-  h+='<div class="note">※ 확정공모가 미정은 밴드(희망공모가) 기준. 일정·가격은 정정신고서에 따라 변동될 수 있음.</div>';
+  h+='<div class="sec">① 공모(상장 예정) 기업 <span class="cnt">(증권신고서 제출 · '+(D.pipeline||[]).length+'개사 · 청약 임박순 · 회사명 클릭 시 신고서)</span></div>';
+  h+=tbl(pipelineRows(), PIPE, {tall:1, freeze:1});
+  h+='<div class="note">※ 확정공모가 미정은 밴드(희망공모가) 기준. 일정·가격은 정정신고서에 따라 변동될 수 있음. 회사명을 누르면 DART 증권신고서로 이동.</div>';
   h+='<div class="sec">② 최근 상장기업 주가 추이 <span class="cnt">('+(D.prices||[]).length+'종목 · 확정공모가 대비)</span></div>';
   h+=tbl(priceRows(), PRICE, {tall:1, freeze:1});
   h+='<div class="note">※ 공모주 청약 참고용. 과거 수익률이 미래 수익을 보장하지 않습니다. 출처: 네이버 금융.</div>';
   document.getElementById('t6body').innerHTML=h;
-  EXPORT.t6={sheets:[{name:'상장예정',cols:PIPE,rows:D.pipeline||[]},{name:'주가추이',cols:PRICE_XLS,rows:priceExport()}], fname:'리테일_'+isoAsof()+'.xlsx'};
+  EXPORT.t6={sheets:[{name:'공모기업',cols:PIPE,rows:D.pipeline||[]},{name:'주가추이',cols:PRICE_XLS,rows:priceExport()}], fname:'공모기업정보_'+isoAsof()+'.xlsx'};
   var b=document.getElementById('dl6'); if(b) b.onclick=function(){ download('t6'); };
 }
 // 딜 목록 → 주관사 집계 (파이썬 _recalc_league 와 동일 규칙)
@@ -1854,17 +1856,39 @@ function renderLeague(){
 function unlockSecret(){
   var box=document.getElementById('t3secret');
   var pw=(document.getElementById('t3pw')||{}).value||'';
-  if(pw!=='1111*'){ box.innerHTML='<div class="note" style="color:var(--red)">비밀번호가 올바르지 않습니다.</div>'; return; }
-  var h='<div class="ctrl">';
-  h+='<div class="seg">'
+  if(pw!=='1111*'){ box.innerHTML='<div class="err">비밀번호가 올바르지 않습니다.</div>'; return; }
+  var h='<div class="ctrl"><button class="btn-dl" id="dl3">⬇ 엑셀</button></div>';
+  // ① YoY 신규상장·공모규모
+  h+='<div class="sec">① 연도별(YoY) 신규상장 · 공모규모 <span class="cnt">(코스닥+유가 · 상장일 기준 · 동기간=올해 최신월까지)</span></div>';
+  h+=tbl(D.yoy||[], YOY);
+  h+='<div class="note">※ 동기간(YTD)은 각 연도 1월~올해 최신 상장월까지로 정렬해 같은 기간끼리 비교.</div>';
+  // ② 상장 후 주가 추이
+  h+='<div class="sec">② 신규 상장기업 상장 후 주가 추이 <span class="cnt">('+(D.prices||[]).length+'종목 · 확정공모가 대비 등락)</span></div>';
+  h+=tbl(priceRows(), PRICE, {tall:1, freeze:1});
+  h+='<div class="note">※ 시초가·종가는 네이버 금융 일별시세 기준. 등락률=확정공모가 대비. '
+    +'상승 <span style="color:#C0392B">빨강</span>·하락 <span style="color:#1F5FA8">파랑</span>. '
+    +'해당 시점 미도래·스팩·공모가 미확정 종목은 표시 제외.</div>';
+  // ③ 월별 상장기업 추이
+  h+='<div class="sec">③ 월별 상장기업 추이 <span class="cnt">(24·25년 코스닥+유가 상장일 · 26년 상장완료 · 상장월 기준)</span></div>';
+  h+=tbl(D.listed_mon||[], T1);
+  // ④ 월별 예심 승인율 (24·25·26)
+  h+='<div class="sec">④ 월별 예심 승인율 <span class="cnt">(24·25·26년 · 스팩 제외 병기)</span></div>';
+  h+=tbl(D.approval||[], T2);
+  h+='<div class="note">※ 결과확정일 월별. 24·25년은 업로드 원천(청구일 24년 이후 표본)이라 24년 초 일부가 빠질 수 있음. 26년은 실시간 집계.</div>';
+  // ⑤ 수요예측·청약 현황
+  h+='<div class="sec">⑤ 수요예측 · 청약 현황 <span class="cnt">(26년 상장 월별 평균)</span></div>';
+  h+=tbl(D.yc||[], T3, {totalKey:"합계"});
+  // ⑥ 주관사 리그테이블 (3모드)
+  h+='<div class="sec">⑥ 주관사 리그테이블 <span class="cnt">(FY26 · 억원)</span></div>';
+  h+='<div class="ctrl"><div class="seg">'
     +'<button class="segbtn active" data-lg="current">현재(납입 기준)</button>'
     +'<button class="segbtn" data-lg="asof">기준일 조회</button>'
-    +'<button class="segbtn" data-lg="proj">전체 상장 가정</button></div>';
-  h+='<span id="lgdatewrap" style="display:none"><label>기준일</label> '
-    +'<input type="date" id="lgdate" class="dt" value="'+isoAsof()+'"></span>';
-  h+='</div>';
+    +'<button class="segbtn" data-lg="proj">전체 상장 가정</button></div>'
+    +'<span id="lgdatewrap" style="display:none"><label>기준일</label> '
+    +'<input type="date" id="lgdate" class="dt" value="'+isoAsof()+'"></span></div>';
   h+='<div id="t3lg"></div>';
-  h+='<div class="sec">4. RAW 통합집계 원본</div>';
+  // ⑦ RAW 다운로드
+  h+='<div class="sec">⑦ RAW 통합집계 원본</div>';
   h+='<a href="IPO_Rawdata_master.xlsx" download class="btn-dl" style="display:inline-block;margin-right:8px;text-decoration:none">⬇ RAW 통합집계 (코스닥·유가·리그24·25·26)</a>';
   h+='<button class="btn-dl" id="dlLedger" style="margin-left:0">⬇ 트랙레코드 원장</button>';
   box.innerHTML=h;
@@ -1879,6 +1903,10 @@ function unlockSecret(){
   var ld=document.getElementById('lgdate'); if(ld) ld.addEventListener('change', renderLeague);
   renderLeague();
   var dl=document.getElementById('dlLedger'); if(dl) dl.onclick=downloadLedger;
+  EXPORT.t3={sheets:[{name:'YoY',cols:YOY,rows:D.yoy||[]},{name:'주가추이',cols:PRICE_XLS,rows:priceExport()},
+    {name:'월별상장',cols:T1,rows:D.listed_mon||[]},{name:'예심승인율',cols:T2,rows:D.approval||[]},
+    {name:'수요예측청약',cols:T3,rows:D.yc||[]}], fname:'IPO정보_'+isoAsof()+'.xlsx'};
+  var eb=document.getElementById('dl3'); if(eb) eb.onclick=function(){ download('t3'); };
 }
 function downloadLedger(){
   if(typeof XLSX==='undefined') return;
@@ -2115,7 +2143,6 @@ function _safe(label, fn){ try{ fn(); }catch(e){ console.error('[init] '+label+'
 _safe('renderT1', renderT1);
 _safe('renderT2', renderT2);
 _safe('renderT3', renderT3);
-_safe('renderT5', renderT5);
 _safe('renderT6', renderT6);
 
 _safe('탭 전환', function(){
@@ -2298,6 +2325,20 @@ def build_dashboard(kind_data, web, kind_master=None):
         elif res in ("심사철회","공모철회","상장철회","심사미승인"):
             ap[m]["철회"] += 1; ap[m]["철회ns"] += ns
     approval = []
+    # 24·25년: 업로드된 예심 원천(예비심사기업 24이후)에서 사전 집계한 상수 사용.
+    #   ※ '청구일 24년 이후' 표본이라 24년 극초반 일부가 빠질 수 있음(표에 기준 명시).
+    for yy in ("2024", "2025"):
+        ym = HIST_APPROVAL.get(yy, {})
+        first = True
+        for mn in range(1, 13):
+            v = ym.get(str(mn))
+            if not v: continue
+            approval.append({"연도": yy[2:]+"년" if first else "", "월": f"{mn}월",
+                "총승인": v["총승인"] or "-", "스팩제외승인": v["스팩제외승인"] or "-",
+                "철회미승인": v["철회미승인"] or "-",
+                "승인율": f'{v["승인율"]:.1f}%' if v["승인율"] is not None else "-",
+                "스팩제외승인율": f'{v["스팩제외승인율"]:.1f}%' if v["스팩제외승인율"] is not None else "-"})
+            first = False
     for i, m in enumerate(MON):
         a = ap[m]; den = a["승인"]+a["철회"]; dns = a["승인ns"]+a["철회ns"]
         approval.append({"연도": "26년" if i == 0 else "", "월": str(int(m))+"월",
@@ -2460,7 +2501,8 @@ def build_dashboard(kind_data, web, kind_master=None):
                 "청약기간": _fmt_sub(rec.get("청약일정", "")),
                 "상장예정일": rec.get("상장예정일", ""),
                 "대표주관": _prog_uw(rec),
-                "사업개요": rec.get("사업개요", "")})
+                "사업개요": rec.get("사업개요", ""),
+                "접수번호": rec.get("최신접수번호", "")})
         _order = {"발행조건확정": 0, "청약완료·상장대기": 1, "정정": 2, "최초": 3}
         pipeline.sort(key=lambda x: (_order.get(x["상태"], 5), x.get("청약기간", "") or "zz"))
     except Exception as e:
