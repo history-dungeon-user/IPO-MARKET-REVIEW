@@ -142,6 +142,9 @@ def fetch_new_listings(sess, year=None):
         # 코넥스는 IPO(코스닥·유가) 대상이 아니므로 제외
         if market == "코넥스":
             continue
+        # 재상장·분할재상장·물적/인적분할 재상장은 신규 IPO가 아니므로 상장완료 집계에서 제외(네오뷰 등).
+        if "재상장" in (ltype or "").replace(" ", ""):
+            continue
         if re.match(r"\d{4}-\d{2}-\d{2}", date) and name:
             rows.append({"회사명": name, "상장일": date,
                          "상장유형": ltype, "시장": market})
@@ -950,7 +953,10 @@ def collect_kind():
     t_apply, t_appr, t_drop, need = [], [], [], []
     for rec in fresh:
         c = kw.classify(rec["심사결과"])
-        if rec["상장유형"].replace(" ", "") == "재상장" and c in ("승인", "철회미승인"):
+        # 재상장·분할재상장·물적/인적분할 재상장은 신규 IPO가 아니므로 전 블록(신청·승인·철회)에서 제외.
+        #   ※ 예전엔 정확일치 '재상장'만·승인/철회에서만 걸러 '분할재상장'(네오뷰)이 신청 탭에 카운트됐다.
+        _ty = rec.get("상장유형", "").replace(" ", "")
+        if "재상장" in _ty:
             continue
         if c == "신청": t_apply.append(rec)
         elif c == "승인" and result_date(rec).startswith(kw.YEAR): t_appr.append(rec)
@@ -2258,6 +2264,11 @@ def build_dashboard(kind_data, web, kind_master=None):
         if co:   parts.append("(주관) " + "·".join(co))
         return "  ".join(parts) if parts else lead
 
+    # 재상장·분할재상장은 신규 IPO가 아니므로 상장완료에서 제외.
+    # 정본(listing_seed)엔 상장유형이 없으니, 예심 원장(kind_master)의 유형으로 이름 대조해 걸러낸다.
+    #   (신규상장 페이지 필터를 통과해 이미 정본에 남은 네오뷰 같은 건까지 확실히 제거)
+    _relisting = {_norm_name(r.get("회사명", "")) for r in (kind_master or {}).get("records", {}).values()
+                  if "재상장" in (r.get("상장유형", "") or "").replace(" ", "")}
     listed = [{
         "기업명": x.get("기업명",""), "상장트랙": x.get("상장트랙",""), "상장일": x.get("상장일",""),
         "밴드": x.get("밴드",""), "공모주식수": x.get("공모주식수",""),
@@ -2266,7 +2277,8 @@ def build_dashboard(kind_data, web, kind_master=None):
         "수요예측경쟁률": x.get("수요예측경쟁률",""),
         "청약기간": _fmt_sub(x.get("청약기간") or x.get("청약일정","")),
         "청약경쟁률": x.get("청약경쟁률",""), "대표주관": _lead(x),
-        "진행상태": x.get("진행상태","")} for x in web["listed"]]
+        "진행상태": x.get("진행상태","")} for x in web["listed"]
+        if _norm_name(x.get("기업명","")) not in _relisting]
 
     prog = [{
         "회사명": x.get("회사명",""), "수요예측기간": _fmt_sub(x.get("수요예측기간","")),
