@@ -23,7 +23,7 @@ await p.screenshot({ path: path.join(OUT,'q_menu.png') });
 await p.evaluate(()=>window.__SKYWARD__.startGame());
 for (let i=0;i<STEPS;i++){
   await p.waitForFunction(()=>{const g=window.__SKYWARD__;return g.state!=='playing'||g.player.state==='idle';},null,{timeout:4000}).catch(()=>{});
-  await p.evaluate(()=>{const g=window.__SKYWARD__; if(g.state!=='playing')return; const r=g.stairs.requiredDir(g.playerIndex); g.onAction(r===0?'right':'left');});
+  await p.evaluate(()=>{const g=window.__SKYWARD__; if(g.state!=='playing')return; const r=g.stairs.requiredDir(g.playerIndex); g.onAction(g.buttonForDir(r));});
   await sleep(60);
 }
 await sleep(350);

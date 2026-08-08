@@ -76,6 +76,7 @@ export class Game {
     // start / retry buttons + first-tap-to-play
     document.getElementById('playBtn').addEventListener('click', () => this.startGame());
     document.getElementById('retryBtn').addEventListener('click', () => this.startGame());
+    this._setupMusicUI();
 
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -97,6 +98,50 @@ export class Game {
     this.camera.fov = h > w ? CFG.camera.fov * 1.16 : CFG.camera.fov;
     this.camera.updateProjectionMatrix();
     if (this.postfx) this.postfx.setSize(w, h, this.dpr);
+  }
+
+  // Load-your-own-song + tap-tempo controls on the start screen.
+  _setupMusicUI() {
+    const $ = (id) => document.getElementById(id);
+    const loadBtn = $('loadSongBtn'), fileIn = $('songFile'), tapBtn = $('tapTempoBtn');
+    const bpmVal = $('bpmVal'), note = $('songNote');
+    if (!loadBtn || !fileIn) return;
+
+    loadBtn.addEventListener('click', () => fileIn.click());
+    fileIn.addEventListener('change', async () => {
+      const f = fileIn.files && fileIn.files[0];
+      if (!f) return;
+      note.textContent = '불러오는 중… / loading…';
+      try {
+        const buf = await f.arrayBuffer();
+        this.audio.init(); this.audio.resume();
+        const ok = this.audio.loadUserSong ? await this.audio.loadUserSong(buf) : false;
+        if (ok) {
+          note.textContent = '♪ ' + f.name + ' · 노래에 맞춰 TAP을 4번 눌러 박자를 맞추세요';
+          tapBtn.hidden = false;
+          this.audio.setPad(true);          // preview so the player can tap in time
+        } else {
+          note.textContent = '이 파일은 재생할 수 없어요 / could not play this file';
+        }
+      } catch (e) {
+        note.textContent = '불러오기 실패 / load failed';
+      }
+    });
+
+    // tap-tempo: tap along with the song; each tap refines BPM + realigns the beat
+    this._taps = [];
+    tapBtn.addEventListener('click', () => {
+      const t = performance.now();
+      if (this._taps.length && t - this._taps[this._taps.length - 1] > 2000) this._taps = [];
+      this._taps.push(t);
+      const arr = this._taps.slice(-4);
+      if (arr.length >= 2) {
+        let sum = 0; for (let i = 1; i < arr.length; i++) sum += arr[i] - arr[i - 1];
+        const bpm = Math.max(50, Math.min(220, Math.round(60000 / (sum / (arr.length - 1)))));
+        if (bpmVal) bpmVal.textContent = bpm;
+        if (this.audio.setTempo) this.audio.setTempo(bpm);
+      }
+    });
   }
 
   // --- camera framing helper ---
@@ -180,9 +225,25 @@ export class Game {
     this._process(action);
   }
 
+  // Which world direction (0=+X, 1=+Z) currently appears on SCREEN-RIGHT. This
+  // flips when the camera swings around (front vs back view), so we resolve the
+  // L/R buttons against what the player actually sees — never inverted.
+  screenRightDir() {
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
+    const p = this.player.root.position;
+    const xScreen = this._occP.set(p.x + 1, p.y, p.z).project(cam).x;
+    const zScreen = this._occS.set(p.x, p.y, p.z + 1).project(cam).x;
+    return xScreen >= zScreen ? 0 : 1;
+  }
+  // Which button reaches a given world direction under the current view (harness/help).
+  buttonForDir(dir) { return dir === this.screenRightDir() ? 'right' : 'left'; }
+
   _process(action) {
     if (this.state !== 'playing') return;
-    const chosen = action === 'right' ? 0 : 1;
+    const rightDir = this.screenRightDir();
+    const chosen = action === 'right' ? rightDir : (rightDir ^ 1);
     const required = this.stairs.requiredDir(this.playerIndex);
     if (required == null) return;
     if (chosen !== required) { this.fail(chosen); return; }

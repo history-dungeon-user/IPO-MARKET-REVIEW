@@ -73,7 +73,7 @@ async function main() {
       const g = window.__SKYWARD__;
       if (g.state !== 'playing') return;
       const req = g.stairs.requiredDir(g.playerIndex);
-      g.onAction(req === 0 ? 'right' : 'left');
+      g.onAction(g.buttonForDir(req));
     });
     await sleep(70);
   }
@@ -85,7 +85,7 @@ async function main() {
   await climb(20); await sleep(300); await shot('05_deep');
 
   // force a game-over to capture the overlay
-  await page.evaluate(() => { const g = window.__SKYWARD__; const r = g.stairs.requiredDir(g.playerIndex); g.onAction(r === 0 ? 'left' : 'right'); });
+  await page.evaluate(() => { const g = window.__SKYWARD__; const r = g.stairs.requiredDir(g.playerIndex); g.onAction(g.buttonForDir(r) === 'right' ? 'left' : 'right'); });
   await sleep(2600); await shot('07_gameover');
 
   // wide landscape frame too (tablet / hero shot)

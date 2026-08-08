@@ -28,8 +28,14 @@ export class Audio {
     this.stepCounter = 0;       // running 16th-note index since start
     this.nextStepTime = 0;      // ctx time of the next 16th to schedule
     this._sched = null;         // setInterval handle for the lookahead loop
-    this.beatDur = 60 / RHYTHM.bpm;
+    this.bpm = RHYTHM.bpm;      // current tempo (defaults to RHYTHM.bpm; setTempo overrides)
+    this.beatDur = 60 / this.bpm;
     this.stepDur = this.beatDur / 4; // one 16th note
+
+    // --- User-song mode: play the player's own track as the bed instead of the procedural one ---
+    this.userMode = false;      // is a user-loaded song the active bed?
+    this.userBuffer = null;     // decoded AudioBuffer of the user's song
+    this.userSource = null;     // the live looping AudioBufferSourceNode (if playing)
   }
 
   init() {
@@ -110,6 +116,72 @@ export class Audio {
     if (this._sched) { clearInterval(this._sched); this._sched = null; }
   }
 
+  // ======================= USER SONG (player's own track) =================
+
+  // Decode raw audio bytes into a loopable buffer and switch to user-song mode.
+  // Returns true on success, false if decoding fails.
+  async loadUserSong(arrayBuffer) {
+    if (!this.ctx || !arrayBuffer) return false;
+    try {
+      const buf = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
+      this.userBuffer = buf;
+      this.userMode = true;
+      // If the transport is already playing, swap the bed to the user song right now.
+      if (this.running) this._startUserSource();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Drop the user's song; the next transport start uses the procedural arrangement again.
+  clearUserSong() {
+    this._stopUserSource();
+    this.userMode = false;
+    this.userBuffer = null;
+  }
+
+  // Set the tempo the scheduler/clock read; realign to a fresh downbeat NOW so the beat
+  // grid and beatPhase/nearestBeatError/beatCount stay correct at the new tempo.
+  setTempo(bpm) {
+    if (!this.ctx) return;
+    bpm = Math.min(220, Math.max(50, bpm));
+    this.bpm = bpm;
+    this.beatDur = 60 / bpm;
+    this.stepDur = this.beatDur / 4;
+    this.transportStart = this.ctx.currentTime; // fresh downbeat at the new tempo
+    this.stepCounter = 0;
+    this.nextStepTime = this.transportStart;
+  }
+
+  // Start (or restart) the looping user-song source into songGain, aligned to the
+  // transport downbeat. If transportStart is in the future, begin at buffer 0 on it;
+  // if it's already in the past, seek into the loop to match elapsed transport time.
+  _startUserSource() {
+    if (!this.ctx || !this.userBuffer) return;
+    this._stopUserSource();
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.userBuffer; src.loop = true;
+    src.connect(this.songGain);
+    const dur = this.userBuffer.duration || 0;
+    if (this.transportStart > now) {
+      src.start(this.transportStart, 0);                 // future downbeat: from the top
+    } else {
+      const off = dur > 0 ? (now - this.transportStart) % dur : 0;
+      src.start(now, off);                               // already running: seek in
+    }
+    this.userSource = src;
+  }
+
+  _stopUserSource() {
+    if (this.userSource) {
+      try { this.userSource.stop(); } catch (e) { /* already stopped */ }
+      try { this.userSource.disconnect(); } catch (e) { /* noop */ }
+      this.userSource = null;
+    }
+  }
+
   // Lookahead scheduler: queue every 16th-note event up to ~120ms ahead of the clock.
   _scheduler() {
     if (!this.running) return;
@@ -130,6 +202,14 @@ export class Audio {
     const pos = step % secLen;                     // 0..15 within the bar
     const accent = RHYTHM.patterns[sec][pos] === 1; // "turn" grid position
     const song = this.songGain;
+
+    // USER-SONG MODE: the player's own track is the bed. Don't layer procedural pitched
+    // parts (bass/pad/lead) over an arbitrary song — only a VERY soft kick on the beat for
+    // reinforcement, so the beat grid + accents + beatCount still drive the game.
+    if (this.userMode) {
+      if (pos % 4 === 0) this._kick(t, 0.05, song); // whisper-quiet downbeat tick
+      return;
+    }
 
     // Chord for this bar (progression walks I - vi - IV - V, one chord per bar).
     const chordSemi = PROG[bar % PROG.length];
@@ -194,6 +274,10 @@ export class Audio {
     const turned = !!info.turned;
     const grade = info.grade || 'good';
 
+    // In user-song mode, a pitched pentatonic lead could clash with an arbitrary track,
+    // so play a NEUTRAL percussive tick (filtered noise click) shaped by grade instead.
+    if (this.userMode) { this._tick(t, grade, turned); return; }
+
     // Next note of the looping pentatonic tune, an octave over the bass so it rings out.
     const semi = PENTA[this.melIdx % PENTA.length];
     this.melIdx++;
@@ -217,6 +301,26 @@ export class Audio {
       this._voice('sine', freq * 2, t, dur * 0.7, g * 0.4, this.bus, 0, sp * 0.5); // octave sparkle
     }
     this._duckPad(t);
+  }
+
+  // Neutral tap tick for user-song mode: a short filtered-noise click, no pitch to clash
+  // with the loaded track. Grade opens the filter / lengthens: perfect = brighter/opener.
+  _tick(t, grade, turned) {
+    let gain, dur, hpF;
+    if (grade === 'perfect') { gain = 0.20; dur = 0.06; hpF = 3500; }
+    else if (grade === 'off') { gain = 0.10; dur = 0.03; hpF = 1200; }
+    else { gain = 0.15; dur = 0.045; hpF = 2400; } // 'good'
+    if (turned) { gain *= 1.2; dur *= 1.15; }
+    const src = this.ctx.createBufferSource();
+    const buf = this.ctx.createBuffer(1, Math.max(1, dur * this.ctx.sampleRate | 0), this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    src.buffer = buf;
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = hpF;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(hp); hp.connect(g); g.connect(this.bus);
+    src.start(t); src.stop(t + dur + 0.02);
   }
 
   // Duck the pad bed a touch on each tap so the accent sits on top, then recover.
@@ -312,6 +416,7 @@ export class Audio {
     o.connect(f); f.connect(g); g.connect(this.bus); o.start(t); o.stop(t + 0.7);
     // Stop the transport and duck the whole song bed away.
     this._stopTransport();
+    this._stopUserSource(); // clear the user track so it doesn't linger after a fall
     this.melIdx = 0;
     this._songLevel = 0.0;
     if (this.songGain) {
@@ -349,6 +454,8 @@ export class Audio {
     const t = this.ctx.currentTime;
     if (on) {
       this._startTransport();
+      // User-song mode: the player's track is the bed, aligned to the transport downbeat.
+      if (this.userMode && this.userBuffer) this._startUserSource();
       this._songLevel = 0.9;
       this.songGain.gain.cancelScheduledValues(t);
       this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), t);
@@ -356,6 +463,7 @@ export class Audio {
       this.spaceSend.gain.setTargetAtTime(0.22, t, 0.6);
     } else {
       this._stopTransport();
+      this._stopUserSource(); // don't let the user track linger past a stop
       this._songLevel = 0.0001;
       this.songGain.gain.cancelScheduledValues(t);
       this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), t);

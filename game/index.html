@@ -130,6 +130,18 @@
   .newbest.show { opacity:1; animation: shimmer 1.4s ease-in-out infinite; }
   @keyframes shimmer { 0%,100%{filter:brightness(1)} 50%{filter:brightness(1.5)} }
 
+  /* music controls on the start screen */
+  .musicbar { margin-top: 20px; display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; pointer-events:auto; }
+  .mbtn { pointer-events:auto; cursor:pointer; font-family:var(--ui-font); font-size:14px; font-weight:800;
+    letter-spacing:.02em; color:var(--cream); padding:11px 20px; border-radius:99px; border:none;
+    background: rgba(255,255,255,.10); box-shadow: inset 0 0 0 1.5px rgba(255,244,224,.34);
+    transition: transform .12s cubic-bezier(.2,1.6,.3,1), background .15s; }
+  .mbtn:active { transform: translateY(2px) scale(.97); }
+  .mbtn.ghosttap { background: linear-gradient(180deg, rgba(123,255,207,.22), rgba(123,255,207,.10));
+    box-shadow: inset 0 0 0 1.5px rgba(123,255,207,.5); color:#eafff7; }
+  .mnote { margin-top:10px; font-size:12px; font-weight:600; letter-spacing:.02em;
+    color: rgba(255,244,224,.6); text-align:center; max-width:320px; line-height:1.5;
+    text-shadow:0 1px 6px rgba(60,25,50,.4); }
   .menu-hint { position: fixed; left:0; right:0; bottom: max(26px, env(safe-area-inset-bottom));
     text-align:center; font-size:12px; font-weight:600; letter-spacing:.1em;
     color: rgba(255,244,224,.55); pointer-events:none;
@@ -173,6 +185,12 @@
   <div class="logo">SKYWARD</div>
   <div class="tagline">Infinite Ascent</div>
   <button class="btn" id="playBtn">TAP TO CLIMB</button>
+  <div class="musicbar">
+    <button class="mbtn" id="loadSongBtn">🎵 내 노래 넣기</button>
+    <button class="mbtn ghosttap" id="tapTempoBtn" hidden>TAP 박자 (<span id="bpmVal">96</span>)</button>
+  </div>
+  <div class="mnote" id="songNote">기본 곡 · “내 노래”로 내 음악에 맞춰 오를 수 있어요</div>
+  <input id="songFile" type="file" accept="audio/*" style="display:none">
   <div class="menu-hint">좌·우 화면을 탭해 오르세요 · Tap left / right to climb</div>
 </div>
 
