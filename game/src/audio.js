@@ -129,18 +129,17 @@ export class Audio {
   // ======================= USER SONG (continuous playback) =================
 
   // Decode raw audio bytes and enter CONTINUOUS-SONG mode: the track plays naturally
-  // and gameplay is synced TO it. Auto-detects tempo (locks the beat grid), builds the
-  // stair turnMap from the song's structure, and measures firstBeatOffset so the clock
-  // can align to the actual audio beats. Does NOT auto-play.
-  // Returns the detected BPM (number) on success, false if decoding fails.
-  async loadUserSong(arrayBuffer) {
+  // and gameplay is synced TO it. By default auto-detects tempo (locks the beat grid),
+  // builds the stair turnMap from the song's structure, and measures firstBeatOffset so
+  // the clock can align to the audio beats. An optional precomputed `beatmap`
+  // ({ bpm, beatDur, firstBeatOffset, turnMap }) — e.g. offline-analyzed for the built-in
+  // song — overrides detection for an exact lock. Does NOT auto-play.
+  // Returns the BPM (number) on success, false if decoding fails.
+  async loadUserSong(arrayBuffer, beatmap = null) {
     if (!this.ctx || !arrayBuffer) return false;
     try {
       const buf = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
       if (!buf || !buf.length) return false; // empty/degenerate decode
-      // Estimate tempo and lock the beat grid to it.
-      const detected = this._detectBpm(buf);
-      this.setTempo(detected); // clamps + stores this.bpm; sets beatDur
       // Stop anything currently sounding — loading doesn't auto-play.
       this._stopTransport(); this._stopUserSource(); this._stopSong();
       // Enter continuous-song mode.
@@ -148,6 +147,19 @@ export class Audio {
       this.hasSong = true;
       this.songBuffer = buf;
       this.songDur = buf.duration;
+
+      // Use a valid precomputed beatmap if given; otherwise auto-analyze the audio.
+      const valid = beatmap && Number.isFinite(beatmap.bpm) && Array.isArray(beatmap.turnMap);
+      if (valid) {
+        this.setTempo(beatmap.bpm); // clamps + stores this.bpm; sets beatDur
+        this.songSegDur = Number.isFinite(beatmap.beatDur) ? beatmap.beatDur : this.beatDur;
+        this.turnMap = beatmap.turnMap;
+        this.firstBeatOffset = Number.isFinite(beatmap.firstBeatOffset) ? beatmap.firstBeatOffset : 0;
+        return this.bpm;
+      }
+      // Auto-detect: estimate tempo, build turnMap, measure the first-beat phase.
+      const detected = this._detectBpm(buf);
+      this.setTempo(detected);
       this.songSegDur = this.beatDur;              // one grid segment = one beat
       this.turnMap = this._buildTurnMap(buf, this.songSegDur);
       this.firstBeatOffset = this._firstBeatOffset(buf, this.beatDur);

@@ -12,6 +12,6 @@ p.on('console',m=>{if(m.type()==='error'&&!/404/.test(m.text()))errs.push('con:'
 await p.goto(`http://127.0.0.1:${port}/index.html`,{waitUntil:'load'});
 await p.waitForFunction(()=>window.__SKYWARD__&&window.__SKYWARD__.postfx,null,{timeout:20000});
 await new Promise(r=>setTimeout(r,3500)); // allow _loadBuiltinSong to decode
-const st=await p.evaluate(()=>({userMode:window.__SKYWARD__.audio.userMode, bpm:window.__SKYWARD__.audio.bpm, note:document.getElementById('songNote').textContent}));
+const st=await p.evaluate(()=>({hasSong:window.__SKYWARD__.audio.hasSong, bpm:window.__SKYWARD__.audio.bpm, off:window.__SKYWARD__.audio.firstBeatOffset, bpm:window.__SKYWARD__.audio.bpm, note:document.getElementById('songNote').textContent}));
 console.log('BOOT:',JSON.stringify(st),'errors:',errs.length?errs:'none');
 await b.close();server.close();

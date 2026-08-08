@@ -12,7 +12,7 @@ import { PostFX } from './postfx.js';
 import { Input } from './input.js';
 import { Audio } from './audio.js';
 import { UI } from './ui.js';
-import { SONG_DATA, SONG_NAME } from './song-data.js';
+import { SONG_DATA, SONG_NAME, SONG_BEATMAP } from './song-data.js';
 
 const BEST_KEY = 'skyward.best.v1';
 
@@ -111,7 +111,8 @@ export class Game {
       const bin = atob(SONG_DATA.slice(SONG_DATA.indexOf(',') + 1));
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const bpm = await (this.audio.loadUserSong ? this.audio.loadUserSong(bytes.buffer) : false);
+      // pass the precomputed beat map so the built-in song locks exactly (no detection)
+      const bpm = await (this.audio.loadUserSong ? this.audio.loadUserSong(bytes.buffer, SONG_BEATMAP) : false);
       if (this.audio.hasSong) {
         const note = document.getElementById('songNote');
         const tapBtn = document.getElementById('tapTempoBtn');
