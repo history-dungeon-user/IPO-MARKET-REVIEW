@@ -112,12 +112,12 @@ export class Game {
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       const bpm = await (this.audio.loadUserSong ? this.audio.loadUserSong(bytes.buffer) : false);
-      if (this.audio.userMode) {
+      if (this.audio.hasSong) {
         const note = document.getElementById('songNote');
         const tapBtn = document.getElementById('tapTempoBtn');
         const bpmVal = document.getElementById('bpmVal');
-        if (note) note.textContent = '♪ ' + SONG_NAME + ' (내 곡) · 탭할 때마다 노래가 이어집니다';
-        if (tapBtn) tapBtn.hidden = true;   // performed mode: tap plays the song, no tempo needed
+        if (note) note.textContent = '♪ ' + SONG_NAME + ' (내 곡) · 노래 박자에 맞춰 계단을 올라요';
+        if (tapBtn) tapBtn.hidden = true;   // tempo auto-detected & grid aligned to the song
       }
     } catch (e) { /* fall back to the procedural song */ }
   }
@@ -140,8 +140,8 @@ export class Game {
         this.audio.init(); this.audio.resume();
         const ok = this.audio.loadUserSong ? await this.audio.loadUserSong(buf) : false;
         if (ok) {
-          note.textContent = '♪ ' + f.name + ' · 탭할 때마다 노래가 이어집니다';
-          tapBtn.hidden = true;             // performed mode: no tempo tapping needed
+          note.textContent = '♪ ' + f.name + ' · 노래 박자에 맞춰 오르세요';
+          tapBtn.hidden = true;             // tempo auto-detected & grid aligned to the song
         } else {
           note.textContent = '이 파일은 재생할 수 없어요 / could not play this file';
         }
@@ -222,7 +222,7 @@ export class Game {
     this.audio.init(); this.audio.resume(); this.audio.setPad(true);
     if (this.audio.resetSong) this.audio.resetSong();      // song restarts from the top
     // when a song is loaded, the stairs' turns follow the song's structure
-    this.stairs.turnMap = (this.audio.performed && this.audio.turnMap) ? this.audio.turnMap : null;
+    this.stairs.turnMap = (this.audio.hasSong && this.audio.turnMap) ? this.audio.turnMap : null;
     this.state = 'playing';
     this.stairs.reset();
     const s0 = this.stairs.stepAt(0);
@@ -297,30 +297,26 @@ export class Game {
     const gain = Math.max(sc.gainMin, sc.gainPerStep + sc.gainRamp * this.score);
     this.stamina = clamp(this.stamina + gain, 0, sc.max);
 
-    // In PERFORMED mode the player drives the song freely with their taps — no
-    // fixed grid, so no on-beat judging. Otherwise (procedural fallback) grade taps.
+    // Rhythm judging vs the song's beat grid: on-beat steps score PERFECT/GOOD
+    // (bonus stamina + call-out). Off-beat still works — never fatal.
     let grade = 'off';
-    if (!this.audio.performed) {
-      const err = this.audio.nearestBeatError ? Math.abs(this.audio.nearestBeatError()) : 999;
-      if (err <= RHYTHM.perfect) grade = 'perfect';
-      else if (err <= RHYTHM.good) grade = 'good';
-      const nowMs = performance.now();
-      if (grade === 'perfect') {
-        this.grooveCombo = (this.grooveCombo || 0) + 1;
-        this.stamina = clamp(this.stamina + 0.032, 0, CFG.stamina.max);
-        if (nowMs - (this._judgeAt || 0) > 200) { this.ui.showJudge('PERFECT', 'perfect'); this._judgeAt = nowMs; }
-      } else if (grade === 'good') {
-        this.grooveCombo = (this.grooveCombo || 0) + 1;
-        this.stamina = clamp(this.stamina + 0.014, 0, CFG.stamina.max);
-        if (this.grooveCombo % 3 === 0 && nowMs - (this._judgeAt || 0) > 220) { this.ui.showJudge('GOOD', 'good'); this._judgeAt = nowMs; }
-      } else { this.grooveCombo = 0; }
-    } else {
-      this.ui.pulseBeat(this.combo);        // pulse the dot on each tap (song advanced)
-    }
+    const err = this.audio.nearestBeatError ? Math.abs(this.audio.nearestBeatError()) : 999;
+    if (err <= RHYTHM.perfect) grade = 'perfect';
+    else if (err <= RHYTHM.good) grade = 'good';
+    const nowMs = performance.now();
+    if (grade === 'perfect') {
+      this.grooveCombo = (this.grooveCombo || 0) + 1;
+      this.stamina = clamp(this.stamina + 0.032, 0, CFG.stamina.max);
+      if (nowMs - (this._judgeAt || 0) > 200) { this.ui.showJudge('PERFECT', 'perfect'); this._judgeAt = nowMs; }
+    } else if (grade === 'good') {
+      this.grooveCombo = (this.grooveCombo || 0) + 1;
+      this.stamina = clamp(this.stamina + 0.014, 0, CFG.stamina.max);
+      if (this.grooveCombo % 3 === 0 && nowMs - (this._judgeAt || 0) > 220) { this.ui.showJudge('GOOD', 'good'); this._judgeAt = nowMs; }
+    } else { this.grooveCombo = 0; }
     this.lastGrade = grade;
 
     this.ui.setScore(this.score);
-    // performed mode: this plays the next slice of the song; procedural: a lead note
+    // song plays continuously; this adds a soft on-beat feedback tick over it
     this.audio.step(this.combo, { turned, score: this.score, grade });
     this.ui.hideHint();
 

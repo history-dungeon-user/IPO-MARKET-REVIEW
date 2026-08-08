@@ -32,20 +32,20 @@ export class Audio {
     this.beatDur = 60 / this.bpm;
     this.stepDur = this.beatDur / 4; // one 16th note
 
-    // --- User-song mode: play the player's own track as the bed instead of the procedural one ---
-    this.userMode = false;      // is a user-loaded song the active bed?
-    this.userBuffer = null;     // decoded AudioBuffer of the user's song
-    this.userSource = null;     // the live looping AudioBufferSourceNode (if playing)
+    // --- User-song mode (legacy bed loop; superseded by continuous song, kept for back-compat) ---
+    this.userMode = false;
+    this.userBuffer = null;
+    this.userSource = null;
 
-    // --- Performed-song mode (Piano-Tiles style): each tap plays the next beat-slice ---
-    this.performed = false;     // true whenever a song buffer is loaded (default or user)
-    this.songBuffer = null;     // decoded AudioBuffer the taps perform
+    // --- Continuous-song mode: a loaded track plays naturally; gameplay is synced TO it ---
+    this.hasSong = false;       // true whenever a song buffer is loaded
+    this.songBuffer = null;     // decoded AudioBuffer that plays continuously
     this.songDur = 0;           // its duration in seconds
-    this.songSegDur = 0;        // one segment (beat) length = 60 / detectedBpm
-    this.songPos = 0;           // play head: where the next tapped slice starts
-    this.turnMap = [];          // 0/1 per segment: where the stairs should flip
-    this._segSource = null;     // currently-sounding slice source
-    this._segGain = null;       // its gain node (for click-free stop)
+    this.songSegDur = 0;        // one grid segment (beat) length = beatDur
+    this.turnMap = [];          // 0/1 per beat-segment: where the stairs should flip
+    this.firstBeatOffset = 0;   // phase (s) of the song's first strong beat, in [0, beatDur)
+    this.songSource = null;     // the live looping AudioBufferSourceNode
+    this.songSrcGain = null;    // its fade gain node
   }
 
   init() {
@@ -126,11 +126,12 @@ export class Audio {
     if (this._sched) { clearInterval(this._sched); this._sched = null; }
   }
 
-  // ======================= USER SONG (player's own track) =================
+  // ======================= USER SONG (continuous playback) =================
 
-  // Decode raw audio bytes, auto-detect its tempo, and enter PERFORMED-SONG mode:
-  // from now on each tapped step plays the next beat-slice of this song, and the
-  // stairs flip on the turnMap derived from the song's structure. No transport runs.
+  // Decode raw audio bytes and enter CONTINUOUS-SONG mode: the track plays naturally
+  // and gameplay is synced TO it. Auto-detects tempo (locks the beat grid), builds the
+  // stair turnMap from the song's structure, and measures firstBeatOffset so the clock
+  // can align to the actual audio beats. Does NOT auto-play.
   // Returns the detected BPM (number) on success, false if decoding fails.
   async loadUserSong(arrayBuffer) {
     if (!this.ctx || !arrayBuffer) return false;
@@ -139,21 +140,39 @@ export class Audio {
       if (!buf || !buf.length) return false; // empty/degenerate decode
       // Estimate tempo and lock the beat grid to it.
       const detected = this._detectBpm(buf);
-      this.setTempo(detected); // clamps + stores this.bpm
-      // Stop any procedural transport/bed — performed mode is silent until a tap.
-      this._stopTransport(); this._stopUserSource(); this._stopSegSource();
-      // Enter performed-song mode.
-      this.userBuffer = buf; this.userMode = true; // kept for back-compat
-      this.performed = true;
+      this.setTempo(detected); // clamps + stores this.bpm; sets beatDur
+      // Stop anything currently sounding — loading doesn't auto-play.
+      this._stopTransport(); this._stopUserSource(); this._stopSong();
+      // Enter continuous-song mode.
+      this.userBuffer = buf; this.userMode = false; // legacy fields, no longer the bed
+      this.hasSong = true;
       this.songBuffer = buf;
       this.songDur = buf.duration;
-      this.songSegDur = 60 / detected;             // one beat per tapped segment
-      this.songPos = 0;
+      this.songSegDur = this.beatDur;              // one grid segment = one beat
       this.turnMap = this._buildTurnMap(buf, this.songSegDur);
+      this.firstBeatOffset = this._firstBeatOffset(buf, this.beatDur);
       return detected;
     } catch (e) {
       return false;
     }
+  }
+
+  // Time (s) of the song's first strong onset (first frame above ~mean+std), reduced
+  // modulo beatDur into [0, beatDur) — the phase to align the beat grid to the audio.
+  _firstBeatOffset(buf, beatDur) {
+    const env = this._onsetEnv(buf);
+    if (!env || !(beatDur > 0)) return 0;
+    const { onset, frameDur, frames } = env;
+    let mean = 0; for (let f = 0; f < frames; f++) mean += onset[f]; mean /= frames;
+    let varr = 0; for (let f = 0; f < frames; f++) { const d = onset[f] - mean; varr += d * d; } varr /= frames;
+    const thr = mean + Math.sqrt(varr);
+    for (let f = 1; f < frames; f++) {
+      if (onset[f] > thr) {
+        const off = f * frameDur;
+        return ((off % beatDur) + beatDur) % beatDur; // into [0, beatDur)
+      }
+    }
+    return 0;
   }
 
   // Compact onset envelope over a decoded AudioBuffer (shared by tempo + turnMap).
@@ -251,52 +270,54 @@ export class Audio {
     return map;
   }
 
-  // Drop the user's song and leave performed mode; the procedural fallback returns.
+  // Drop the loaded song and leave continuous-song mode; the procedural fallback returns.
   clearUserSong() {
     this._stopUserSource();
-    this._stopSegSource();
+    this._stopSong();
     this.userMode = false;
     this.userBuffer = null;
-    this.performed = false;
+    this.hasSong = false;
     this.songBuffer = null;
     this.songDur = 0;
-    this.songPos = 0;
     this.turnMap = [];
   }
 
-  // ======================= PERFORMED SONG PLAYBACK ========================
+  // ======================= CONTINUOUS SONG PLAYBACK =======================
 
-  // Core of performed mode: play the NEXT beat-slice of the song from the current
-  // play head. Continuous if tapped in time, gaps if late, silence if not tapped.
-  playNextSegment() {
-    if (!this.ready || this.muted || !this.performed || !this.songBuffer || !this.ctx) return;
+  // Start the loaded song playing continuously (looping) with a short fade-in, and
+  // ALIGN the beat grid to the song's beats: transportStart = now + firstBeatOffset,
+  // with the step/section counters reset so beatPhase/nearestBeatError/beatCount line
+  // up with the actual audio. The lookahead scheduler runs for the clock (+ soft kit).
+  _startSong() {
+    if (!this.ready || !this.ctx || !this.songBuffer) return;
+    this._stopSong();
     const now = this.ctx.currentTime;
-    const seg = this.songSegDur;
-    if (!(seg > 0)) return;
-    // Quick fade of the previous slice to avoid clicks.
-    this._stopSegSource(now, 0.006);
-    // New slice: buffer -> gain (short attack + release) -> master/soft-clip bus.
-    const src = this.ctx.createBufferSource(); src.buffer = this.songBuffer;
+    // Looping source -> its own fade gain -> songGain -> bus (master/soft-clip).
+    const src = this.ctx.createBufferSource(); src.buffer = this.songBuffer; src.loop = true;
     const g = this.ctx.createGain();
-    const end = now + seg * 1.15;
     g.gain.setValueAtTime(0.0001, now);
-    g.gain.linearRampToValueAtTime(1.0, now + 0.004);                       // ~4ms attack
-    g.gain.setValueAtTime(1.0, Math.max(now + 0.004, end - 0.03));
-    g.gain.exponentialRampToValueAtTime(0.0001, end);                        // short release
-    src.connect(g); g.connect(this.bus);
-    src.start(now, Math.max(0, Math.min(this.songPos, Math.max(0, this.songDur - 0.01))));
-    src.stop(end + 0.02);
-    src.onended = () => { if (this._segSource === src) { this._segSource = null; this._segGain = null; } };
-    this._segSource = src; this._segGain = g;
-    // Advance the play head; wrap near the end so it loops seamlessly.
-    this.songPos += seg;
-    if (this.songPos >= this.songDur - seg) this.songPos = 0;
+    g.gain.exponentialRampToValueAtTime(1.0, now + 0.2); // ~0.2s fade in
+    src.connect(g); g.connect(this.songGain);
+    src.start(now);
+    this.songSource = src; this.songSrcGain = g;
+    // Make sure the song bus is audible (it may have been ducked by a prior stop/fail).
+    this._songLevel = 0.9;
+    this.songGain.gain.cancelScheduledValues(now);
+    this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), now);
+    this.songGain.gain.exponentialRampToValueAtTime(this._songLevel, now + 0.2);
+    // Align the beat clock to the audio's first strong beat, then run the scheduler.
+    this.transportStart = now + this.firstBeatOffset;
+    this.stepCounter = 0;
+    this.nextStepTime = this.transportStart;
+    this.running = true;
+    if (!this._sched) this._sched = setInterval(() => this._scheduler(), 25);
+    this.spaceSend.gain.setTargetAtTime(0.16, now, 0.5);
   }
 
-  // Stop the current slice with a tiny fade (default) so it never clicks.
-  _stopSegSource(at, fade = 0.006) {
-    if (!this._segSource) return;
-    const src = this._segSource, g = this._segGain;
+  // Stop the continuous song source with a tiny fade so it never clicks.
+  _stopSong(at, fade = 0.08) {
+    if (!this.songSource) return;
+    const src = this.songSource, g = this.songSrcGain;
     const t = (at != null) ? at : this.ctx.currentTime;
     if (g) {
       try {
@@ -305,14 +326,13 @@ export class Audio {
         g.gain.exponentialRampToValueAtTime(0.0001, t + fade);
       } catch (e) { /* noop */ }
     }
-    try { src.stop(t + fade + 0.01); } catch (e) { /* already stopped */ }
-    this._segSource = null; this._segGain = null;
+    try { src.stop(t + fade + 0.02); } catch (e) { /* already stopped */ }
+    this.songSource = null; this.songSrcGain = null;
   }
 
-  // Rewind the performed song to the top (stops the current slice cleanly).
+  // Stop the song (a fresh setPad(true) restarts it aligned from the top).
   resetSong() {
-    this._stopSegSource();
-    this.songPos = 0;
+    this._stopSong();
   }
 
   // Set the tempo the scheduler/clock read; realign to a fresh downbeat NOW so the beat
@@ -377,11 +397,11 @@ export class Audio {
     const accent = RHYTHM.patterns[sec][pos] === 1; // "turn" grid position
     const song = this.songGain;
 
-    // USER-SONG MODE: the player's own track is the bed. Don't layer procedural pitched
-    // parts (bass/pad/lead) over an arbitrary song — only a VERY soft kick on the beat for
-    // reinforcement, so the beat grid + accents + beatCount still drive the game.
-    if (this.userMode) {
-      if (pos % 4 === 0) this._kick(t, 0.05, song); // whisper-quiet downbeat tick
+    // CONTINUOUS-SONG MODE: the loaded track IS the music. Don't layer procedural pitched
+    // parts (bass/pad/lead) over it — only a VERY soft downbeat kick for optional reinforcement,
+    // so the beat grid + accents + beatCount still drive the game.
+    if (this.hasSong) {
+      if (pos % 4 === 0) this._kick(t, 0.035, song); // whisper-quiet downbeat tick
       return;
     }
 
@@ -439,17 +459,18 @@ export class Audio {
 
   // ======================= PLAYER TAP ACCENT ==============================
 
-  // step() is the PLAYER PERFORMING THE MELODY — one tap = the next note of the tune.
-  // A prominent marimba/bell pluck that sits clearly above the backing bed. It does NOT
-  // advance the song (the transport owns tempo). info.grade shapes tone; info.turned = bigger.
+  // step() is the per-tap feedback. With a loaded song it's a soft tactile tick UNDER the
+  // continuous music; in procedural mode it's the prominent marimba/bell melody pluck.
+  // info.grade shapes tone; info.turned = a touch bigger.
   step(combo, info = {}) {
     if (!this.ready || this.muted) return;
     const t = this.ctx.currentTime;
     const turned = !!info.turned;
     const grade = info.grade || 'good';
 
-    // PERFORMED-SONG MODE: the tap IS the sound — play the next beat-slice, nothing else.
-    if (this.performed) { this.playNextSegment(); return; }
+    // CONTINUOUS-SONG MODE: the song is the music — a tap only plays a soft, unpitched
+    // tactile tick for feedback. It must NOT slice/retrigger the song.
+    if (this.hasSong) { this._tick(t, grade, turned); return; }
 
     // Next note of the looping pentatonic tune, an octave over the bass so it rings out.
     const semi = PENTA[this.melIdx % PENTA.length];
@@ -476,13 +497,14 @@ export class Audio {
     this._duckPad(t);
   }
 
-  // Neutral tap tick for user-song mode: a short filtered-noise click, no pitch to clash
-  // with the loaded track. Grade opens the filter / lengthens: perfect = brighter/opener.
+  // Soft, unpitched tactile tap tick for continuous-song mode: a short filtered-noise
+  // click that sits UNDER the music (no pitch to clash). Grade shapes it: perfect =
+  // brighter/opener, off = duller. Pure feedback — it never retriggers the song.
   _tick(t, grade, turned) {
     let gain, dur, hpF;
-    if (grade === 'perfect') { gain = 0.20; dur = 0.06; hpF = 3500; }
-    else if (grade === 'off') { gain = 0.10; dur = 0.03; hpF = 1200; }
-    else { gain = 0.15; dur = 0.045; hpF = 2400; } // 'good'
+    if (grade === 'perfect') { gain = 0.13; dur = 0.055; hpF = 3800; } // brighter/opener
+    else if (grade === 'off') { gain = 0.06; dur = 0.028; hpF = 1100; } // duller
+    else { gain = 0.09; dur = 0.04; hpF = 2400; } // 'good'
     if (turned) { gain *= 1.2; dur *= 1.15; }
     const src = this.ctx.createBufferSource();
     const buf = this.ctx.createBuffer(1, Math.max(1, dur * this.ctx.sampleRate | 0), this.ctx.sampleRate);
@@ -587,10 +609,10 @@ export class Audio {
     f.frequency.exponentialRampToValueAtTime(200, t + 0.6);
     g.gain.setValueAtTime(0.24, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
     o.connect(f); f.connect(g); g.connect(this.bus); o.start(t); o.stop(t + 0.7);
-    // Stop the transport / bed / performed slice so nothing lingers after a fall.
+    // Stop the transport / bed / continuous song so nothing lingers after a fall.
     this._stopTransport();
     this._stopUserSource();
-    this._stopSegSource();
+    this._stopSong(t, 0.4);
     this.melIdx = 0;
     this._songLevel = 0.0;
     if (this.songGain) {
@@ -622,25 +644,28 @@ export class Audio {
     });
   }
 
-  // setPad(true) STARTS the procedural song (transport + fade in); setPad(false) STOPS it.
-  // In PERFORMED-SONG mode there is no auto-transport: the song stays silent until the
-  // player taps, so setPad is a no-op (aside from making sure nothing procedural lingers).
+  // setPad(true) STARTS the music: with a loaded song it resumes + plays it continuously,
+  // aligned to the beat grid; otherwise it starts the procedural transport. setPad(false)
+  // STOPS the song/transport and scheduler (fade).
   setPad(on) {
     if (!this.ready) return;
-    if (this.performed) { if (!on) { this._stopTransport(); this._stopUserSource(); } return; }
     const t = this.ctx.currentTime;
     if (on) {
-      this._startTransport();
-      // User-song mode: the player's track is the bed, aligned to the transport downbeat.
-      if (this.userMode && this.userBuffer) this._startUserSource();
-      this._songLevel = 0.9;
-      this.songGain.gain.cancelScheduledValues(t);
-      this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), t);
-      this.songGain.gain.exponentialRampToValueAtTime(this._songLevel, t + 1.2);
-      this.spaceSend.gain.setTargetAtTime(0.22, t, 0.6);
+      this.resume();
+      if (this.hasSong) {
+        this._startSong(); // continuous playback + beat-grid alignment + scheduler
+      } else {
+        this._startTransport(); // procedural fallback song
+        this._songLevel = 0.9;
+        this.songGain.gain.cancelScheduledValues(t);
+        this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), t);
+        this.songGain.gain.exponentialRampToValueAtTime(this._songLevel, t + 1.2);
+        this.spaceSend.gain.setTargetAtTime(0.22, t, 0.6);
+      }
     } else {
       this._stopTransport();
-      this._stopUserSource(); // don't let the user track linger past a stop
+      this._stopUserSource();
+      this._stopSong(); // stop continuous song too (fade)
       this._songLevel = 0.0001;
       this.songGain.gain.cancelScheduledValues(t);
       this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), t);
