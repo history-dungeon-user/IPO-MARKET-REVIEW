@@ -322,18 +322,24 @@ export class Player {
       // alternating-foot run cycle: lead swings forward+up, trailing pushes back+down
       runReach = Math.sin(Math.PI * t);
       leadIdx = h.lead;
+      // cute waddle: a little body roll toward the lead foot, synced to the stride
+      bankTarget += (h.lead === 0 ? 1 : -1) * runReach * 0.08;
       if (t >= 1 && !h.landed) {
         h.landed = true;
         this.sy = 0.78;               // landing squash HIT (wide & short)
         this.state = 'land';
         this.landT = 0;
+        this.hop = null;              // clear BEFORE onLand — a buffered tap in
+                                      // onLand may start a new hop we must not clobber
         // impact kicks: ears flap up, tail bounces, orb overshoots
-        this.earSpring.kick(9);
-        this.tailSpring.kick(7);
-        this.antSpring.kick(11);
+        this.earSpring.kick(12);
+        this.tailSpring.kick(10);
+        this.antSpring.kick(13);
         if (h.onLand) h.onLand();
-        this.hop = null;
       }
+    } else if (this.state === 'hop' && !this.hop) {
+      // watchdog: state says 'hop' but there is no hop object — never get stuck
+      this.state = 'idle';
     } else if (this.state === 'land') {
       this.landT += dt;
       const k = clamp(this.landT / 0.24, 0, 1);
@@ -362,26 +368,30 @@ export class Player {
     // feet: alternating run cycle (lead reaches forward+up, trail drives back+down),
     // layered over the squash splay; all offsets ease back to rest when not hopping.
     const squashAmt = Math.max(0, 1 - sy);
-    const fr = clamp(dt * 14, 0, 1);
+    const fr = clamp(dt * 16, 0, 1);
     for (let i = 0; i < this.feet.length; i++) {
       const ft = this.feet[i];
-      let tx = 0, ty = 0, tz = 0;
+      let tx = 0, ty = 0, tz = 0, trot = 0;
       if (leadIdx >= 0) {
-        if (i === leadIdx) {         // LEAD foot: swing forward + up, reaching for the next step
-          tz = runReach * 0.15;
-          ty = runReach * 0.10;
-          tx = runReach * 0.02 * ft.sx;
-        } else {                     // TRAILING foot: push back + down (push-off)
-          tz = -runReach * 0.12;
-          ty = -runReach * 0.03;
+        if (i === leadIdx) {         // LEAD foot: big swing forward+up, toe kicks up
+          tz = runReach * 0.23;
+          ty = runReach * 0.17;
+          tx = runReach * 0.03 * ft.sx;
+          trot = -runReach * 0.85;   // kick the toe up as it reaches
+        } else {                     // TRAILING foot: drive back+down (push-off), toe points back
+          tz = -runReach * 0.17;
+          ty = -runReach * 0.05;
+          trot = runReach * 0.55;
         }
       }
       ft.rx = lerp(ft.rx, tx, fr);
       ft.ry = lerp(ft.ry, ty, fr);
       ft.rz = lerp(ft.rz, tz, fr);
+      ft.rrot = lerp(ft.rrot || 0, trot, fr);
       ft.mesh.position.x = ft.baseX + squashAmt * 0.12 * ft.sx + ft.rx;
       ft.mesh.position.y = 0.07 - squashAmt * 0.03 + ft.ry;
       ft.mesh.position.z = 0.11 + ft.rz;
+      ft.mesh.rotation.x = ft.rrot;
     }
 
     // --- secondary motion + idle life ---

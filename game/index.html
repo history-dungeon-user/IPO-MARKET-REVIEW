@@ -137,6 +137,9 @@
     background: rgba(255,255,255,.10); box-shadow: inset 0 0 0 1.5px rgba(255,244,224,.34);
     transition: transform .12s cubic-bezier(.2,1.6,.3,1), background .15s; }
   .mbtn:active { transform: translateY(2px) scale(.97); }
+  label.mbtn { display:inline-block; }
+  .vhidden { position:absolute; width:1px; height:1px; opacity:0; overflow:hidden;
+    clip:rect(0 0 0 0); white-space:nowrap; border:0; padding:0; margin:-1px; }
   .mbtn.ghosttap { background: linear-gradient(180deg, rgba(123,255,207,.22), rgba(123,255,207,.10));
     box-shadow: inset 0 0 0 1.5px rgba(123,255,207,.5); color:#eafff7; }
   .mnote { margin-top:10px; font-size:12px; font-weight:600; letter-spacing:.02em;
@@ -186,11 +189,12 @@
   <div class="tagline">Infinite Ascent</div>
   <button class="btn" id="playBtn">TAP TO CLIMB</button>
   <div class="musicbar">
-    <button class="mbtn" id="loadSongBtn">🎵 내 노래 넣기</button>
+    <label class="mbtn" id="loadSongBtn" for="songFile">🎵 내 노래 넣기</label>
     <button class="mbtn ghosttap" id="tapTempoBtn" hidden>TAP 박자 (<span id="bpmVal">96</span>)</button>
   </div>
   <div class="mnote" id="songNote">기본 곡 · “내 노래”로 내 음악에 맞춰 오를 수 있어요</div>
-  <input id="songFile" type="file" accept="audio/*" style="display:none">
+  <!-- visually hidden (NOT display:none, so Samsung Internet etc. still open the picker) -->
+  <input id="songFile" type="file" accept="audio/*" class="vhidden">
   <div class="menu-hint">좌·우 화면을 탭해 오르세요 · Tap left / right to climb</div>
 </div>
 

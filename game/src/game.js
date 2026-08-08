@@ -107,7 +107,8 @@ export class Game {
     const bpmVal = $('bpmVal'), note = $('songNote');
     if (!loadBtn || !fileIn) return;
 
-    loadBtn.addEventListener('click', () => fileIn.click());
+    // loadBtn is a <label for="songFile">, so tapping it opens the picker
+    // natively (works on Samsung Internet / iOS Safari where .click() is blocked).
     fileIn.addEventListener('change', async () => {
       const f = fileIn.files && fileIn.files[0];
       if (!f) return;
