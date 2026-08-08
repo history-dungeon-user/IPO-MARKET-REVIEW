@@ -50,8 +50,8 @@ export class Stairs {
     this.matA = stepMaterial(PALETTE.step.top, PALETTE.step.side, PALETTE.step.edge);
     this.matB = stepMaterial(PALETTE.step.altTop, PALETTE.step.altSide, PALETTE.step.edge);
     // ghosted variants used to cut away any step that crosses in front of the hero
-    this.matAFade = this.matA.clone(); this.matAFade.transparent = true; this.matAFade.opacity = 0.14; this.matAFade.depthWrite = false;
-    this.matBFade = this.matB.clone(); this.matBFade.transparent = true; this.matBFade.opacity = 0.14; this.matBFade.depthWrite = false;
+    this.matAFade = this.matA.clone(); this.matAFade.transparent = true; this.matAFade.opacity = 0.07; this.matAFade.depthWrite = false;
+    this.matBFade = this.matB.clone(); this.matBFade.transparent = true; this.matBFade.opacity = 0.07; this.matBFade.depthWrite = false;
 
     this.baseMat = (dir) => (dir === 0 ? this.matA : this.matB);
     this.fadeMat = (dir) => (dir === 0 ? this.matAFade : this.matBFade);

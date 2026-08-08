@@ -66,6 +66,7 @@ export class Game {
     this.camAz = CFG.camera.baseAz;   // smoothed camera azimuth
     this.camPos = new Vector3();
     this.camTarget = new Vector3();
+    this.groundPos = new Vector3();   // smoothed step-follow (no jump-arc bob)
     this._tmp = new Vector3();
     this._occP = new Vector3();
     this._occS = new Vector3();
@@ -100,7 +101,7 @@ export class Game {
 
   // --- camera framing helper ---
   desiredCam(out) {
-    const p = this.player.root.position;
+    const p = this.groundPos;      // follow the smoothed step, not the jump arc
     const c = CFG.camera;
     const menu = this.state === 'menu';
     const R = menu ? c.menu.radiusXZ : c.radiusXZ;
@@ -109,7 +110,7 @@ export class Game {
     return out;
   }
   desiredLook(out) {
-    const p = this.player.root.position;
+    const p = this.groundPos;
     const c = CFG.camera;
     if (this.state === 'menu') {
       // frame the mascot as a clear hero, no centroid bias
@@ -141,6 +142,7 @@ export class Game {
     this.player.reset(start);
     this.player.faceDir(this.stairs.requiredDir(0) ?? 0);
     this.runBias = 0; this.camAz = CFG.camera.baseAz;
+    this.groundPos.copy(start);
     this.desiredCam(this.camPos); this.camera.position.copy(this.camPos);
     this.desiredLook(this.camTarget); this.camera.lookAt(this.camTarget);
     this.postfx.fade = 0;
@@ -160,6 +162,7 @@ export class Game {
     this.player.faceDir(this.lastDir);
     this.buffered = null;
     this.runBias = 0; this.camAz = CFG.camera.baseAz;
+    this.groundPos.copy(start);
     this.postfx.fade = 0;
     this.desiredCam(this.camPos); this.camera.position.copy(this.camPos);
     this.ui.setScore(0); this.ui.setStamina(this.stamina);
@@ -206,8 +209,8 @@ export class Game {
     this.stamina = clamp(this.stamina + gain, 0, sc.max);
 
     this.ui.setScore(this.score);
-    this.audio.step(this.combo);
-    if (turned) this.audio.turn();
+    // the climb performs the music: each step advances the melody; turns accent
+    this.audio.step(this.combo, { turned, score: this.score });
     this.ui.hideHint();
 
     // combo call-outs & milestones
@@ -280,7 +283,16 @@ export class Game {
     this.player.update(dt, this.time);
     this.stairs.maintain(this.playerIndex);
 
-    // camera azimuth eases toward the run bias to keep the tower centred
+    // Smooth the camera's ground anchor toward the CURRENT STEP (not the jump
+    // arc) so the view glides steadily instead of bobbing with every hop — the
+    // single biggest anti-motion-sickness lever.
+    const cur = this.stairs.stepAt(this.playerIndex);
+    if (cur) { this._occP.copy(cur.pos); this._occP.y += CFG.step.thickness / 2; }
+    else this._occP.copy(this.player.root.position);
+    this.groundPos.lerp(this._occP, clamp(dt * 6, 0, 1));
+
+    // camera azimuth eases VERY gently toward the run bias (rotation is the main
+    // vertigo source, so keep it small & slow)
     const targetAz = CFG.camera.baseAz + this.runBias * CFG.camera.maxYaw;
     this.camAz += (targetAz - this.camAz) * (this.state === 'playing' ? CFG.camera.yawFollow : 0.02);
 
@@ -290,11 +302,11 @@ export class Game {
     this.camPos.lerp(this._tmp, foll);
     this.desiredLook(this.camTarget);
 
-    // camera shake
-    this.shake = Math.max(0, this.shake - dt * 2.2);
+    // camera shake — subtle; big vertical shakes read as nausea, keep it tiny
+    this.shake = Math.max(0, this.shake - dt * 2.6);
     const sh = this.shake * this.shake;
-    const ox = (Math.sin(this.time * 51.0) + Math.sin(this.time * 89.0)) * 0.5 * sh * 0.4;
-    const oy = (Math.sin(this.time * 63.0) + Math.sin(this.time * 97.0)) * 0.5 * sh * 0.4;
+    const ox = (Math.sin(this.time * 51.0) + Math.sin(this.time * 89.0)) * 0.5 * sh * 0.18;
+    const oy = (Math.sin(this.time * 63.0) + Math.sin(this.time * 97.0)) * 0.5 * sh * 0.14;
     this.camera.position.set(this.camPos.x + ox, this.camPos.y + oy, this.camPos.z);
     this.camera.lookAt(this.camTarget);
 
@@ -314,18 +326,18 @@ export class Game {
     const cam = this.camera;
     cam.updateMatrixWorld();
     cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
-    const head = this._occP.copy(this.player.root.position); head.y += 0.75;
+    const head = this._occP.copy(this.player.root.position); head.y += 0.82;
     const camDist = this.player.root.position.distanceTo(cam.position);
     const hp = head.clone().project(cam);   // head NDC (one alloc/frame is fine)
 
     for (const st of this.stairs.steps) {
       let occ = false;
-      if (st.index >= this.playerIndex - 2 && st.index <= this.playerIndex + 3) {
+      if (st.index >= this.playerIndex - 3 && st.index <= this.playerIndex + 3) {
         const sp = this._occS.copy(st.pos); sp.y += CFG.step.thickness / 2;
         const sDist = sp.distanceTo(cam.position);
-        if (sDist < camDist - 0.35) {          // nearer to camera than the hero
+        if (sDist < camDist - 0.25) {          // nearer to camera than the hero
           const s = sp.project(cam);
-          if (Math.abs(s.x - hp.x) < 0.17 && s.y > hp.y - 0.12) occ = true;
+          if (Math.abs(s.x - hp.x) < 0.22 && s.y > hp.y - 0.18) occ = true;
         }
       }
       const want = occ ? this.stairs.fadeMat(st.dir) : this.stairs.baseMat(st.dir);

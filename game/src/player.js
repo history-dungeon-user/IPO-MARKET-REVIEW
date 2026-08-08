@@ -174,6 +174,11 @@ export class Player {
     this.t = 0;
     this.sy = 1;                     // current vertical scale (sxz derived, volume-preserving)
     this.bank = 0;                   // current body roll (rig.rotation.z)
+    this.pitch = 0;                  // current forward lean (rig.rotation.x), smoothed
+    this.shift = 0;                  // current body/head forward weight shift, smoothed
+    this.stride = 0;                 // run-cycle parity: which foot leads (flips each hop)
+    // per-foot smoothed run-cycle offsets (ease back to rest when idle)
+    for (const ft of this.feet) { ft.rx = 0; ft.ry = 0; ft.rz = 0; }
     // secondary-motion springs
     this.earSpring.x = this.earSpring.v = 0;
     this.tailSpring.x = this.tailSpring.v = 0;
@@ -193,14 +198,17 @@ export class Player {
 
   hopTo(target, dir, duration, onLand) {
     this.faceDir(dir);
+    // alternate the leading foot every step so it reads as a real running gait
+    this.stride ^= 1;
     this.hop = {
       from: this.root.position.clone(),
       to: target.clone(),
       dur: duration, t: 0, onLand, landed: false,
+      lead: this.stride,             // index of the foot that swings forward this step
     };
     this.state = 'hop';
-    // anticipation: crouch + kick the springs so ears/tail/orb lag the launch
-    this.sy = 0.85;
+    // anticipation: deeper crouch + kick the springs so ears/tail/orb lag the launch
+    this.sy = 0.82;
     this.earSpring.kick(-6);
     this.tailSpring.kick(-5);
     this.antSpring.kick(-7);
@@ -244,6 +252,8 @@ export class Player {
   }
 
   update(dt, time) {
+    // clamp dt so a frame hitch can't jerk the run/lean smoothing or physics
+    dt = Math.min(dt, 0.05);
     // smooth facing toward target yaw
     let d = this.facing - this.yaw;
     while (d > Math.PI) d -= Math.PI * 2;
@@ -285,6 +295,10 @@ export class Player {
 
     // --- squash/stretch state machine: drive vertical scale sy (sxz derived, volume-preserving) ---
     let bankTarget = 0;
+    let pitchTarget = 0;             // forward lean about local X (airborne)
+    let shiftTarget = 0;             // body/head forward weight shift
+    let runReach = 0;                // 0->1->0 airborne envelope for the foot run cycle
+    let leadIdx = -1;                // which foot leads this step (-1 = plant/rest)
     if (this.state === 'hop' && this.hop) {
       const h = this.hop; h.t += dt;
       const t = clamp(h.t / h.dur, 0, 1);
@@ -293,11 +307,18 @@ export class Player {
       // parabolic arc: y = lerp + 4*t*(1-t)*arcHeight
       const arc = 4 * t * (1 - t);
       this.root.position.y = lerp(h.from.y, h.to.y, e) + arc * 0.55;
-      // launch crouch (0.85) -> ascent stretch (1.12 at apex) -> settle toward neutral
-      if (t < 0.18) this.sy = lerp(0.85, 1.12, t / 0.18);
-      else this.sy = lerp(1.12, 0.98, (t - 0.18) / 0.82);
+      // push-off crouch -> ascent stretch -> upward "reach" near apex -> settle grounded
+      if (t < 0.15)      this.sy = lerp(0.82, 1.10, t / 0.15);
+      else if (t < 0.50) this.sy = lerp(1.10, 1.18, (t - 0.15) / 0.35);   // reach at apex
+      else               this.sy = lerp(1.18, 0.98, (t - 0.50) / 0.50);
       // bank ~10° into the direction of travel, strongest mid-arc
       bankTarget = 0.17 * (1 - Math.abs(2 * t - 1));
+      // forward lean + weight lead into the leap, easing back to upright on landing
+      pitchTarget = 0.26 * arc;
+      shiftTarget = 0.045 * arc;
+      // alternating-foot run cycle: lead swings forward+up, trailing pushes back+down
+      runReach = Math.sin(Math.PI * t);
+      leadIdx = h.lead;
       if (t >= 1 && !h.landed) {
         h.landed = true;
         this.sy = 0.78;               // landing squash HIT (wide & short)
@@ -321,19 +342,43 @@ export class Player {
       this.sy = lerp(this.sy, 1 + Math.sin(time * 2.6) * 0.03, clamp(dt * 6, 0, 1));
     }
 
-    // apply body transform: yaw + bank, volume-preserving scale
+    // apply body transform: forward lean (pitch) + yaw + bank, volume-preserving scale
     this.bank = lerp(this.bank, bankTarget, clamp(dt * 12, 0, 1));
+    this.pitch = lerp(this.pitch, pitchTarget, clamp(dt * 10, 0, 1));
     const B = 1.16;                  // base scale — a touch more hero presence
     const sy = this.sy;
     const sxz = 1 / Math.sqrt(sy);   // volume preservation: XZ shrinks as Y grows
     this.rig.scale.set(sxz * B, sy * B, sxz * B);
-    this.rig.rotation.set(0, this.yaw, this.bank);
+    this.rig.rotation.set(this.pitch, this.yaw, this.bank);
 
-    // feet splay outward + drop a touch when squashed
+    // body/head lead forward into the leap, settling back for weight on land
+    this.shift = lerp(this.shift, shiftTarget, clamp(dt * 10, 0, 1));
+    this.body.position.z = this.shift;
+    this.head.position.z = this.shift * 0.6;
+
+    // feet: alternating run cycle (lead reaches forward+up, trail drives back+down),
+    // layered over the squash splay; all offsets ease back to rest when not hopping.
     const squashAmt = Math.max(0, 1 - sy);
-    for (const ft of this.feet) {
-      ft.mesh.position.x = ft.baseX + squashAmt * 0.12 * ft.sx;
-      ft.mesh.position.y = 0.07 - squashAmt * 0.03;
+    const fr = clamp(dt * 14, 0, 1);
+    for (let i = 0; i < this.feet.length; i++) {
+      const ft = this.feet[i];
+      let tx = 0, ty = 0, tz = 0;
+      if (leadIdx >= 0) {
+        if (i === leadIdx) {         // LEAD foot: swing forward + up, reaching for the next step
+          tz = runReach * 0.15;
+          ty = runReach * 0.10;
+          tx = runReach * 0.02 * ft.sx;
+        } else {                     // TRAILING foot: push back + down (push-off)
+          tz = -runReach * 0.12;
+          ty = -runReach * 0.03;
+        }
+      }
+      ft.rx = lerp(ft.rx, tx, fr);
+      ft.ry = lerp(ft.ry, ty, fr);
+      ft.rz = lerp(ft.rz, tz, fr);
+      ft.mesh.position.x = ft.baseX + squashAmt * 0.12 * ft.sx + ft.rx;
+      ft.mesh.position.y = 0.07 - squashAmt * 0.03 + ft.ry;
+      ft.mesh.position.z = 0.11 + ft.rz;
     }
 
     // --- secondary motion + idle life ---

@@ -35,11 +35,11 @@ export const CFG = {
     // Azimuth tracks the recent run direction so the tower stays centred and
     // the empty dead-space on long straight runs collapses.
     baseAz: Math.PI / 4,   // 45deg neutral iso
-    maxYaw: 0.5,           // +-28deg swing toward the current run
-    yawFollow: 0.07,       // eases toward the run bias
+    maxYaw: 0.14,          // tiny recentre swing — rotation is the main vertigo source
+    yawFollow: 0.03,       // very slow so it never feels like the world is turning
     // look target = player + (fwd, up, fwd): seats the character low, lens up.
-    look: { fwd: 1.9, up: 3.4 },
-    follow: 0.12,          // lerp factor
+    look: { fwd: 1.9, up: 3.15 },
+    follow: 0.11,          // lerp factor
     shake: 0.0,
     // menu hero framing: closer & lower so the mascot reads as the star
     menu: { radiusXZ: 12.5, offsetY: 8.4, lookFwd: 0.6, lookUp: 2.35 },
