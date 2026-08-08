@@ -141,6 +141,7 @@ export class Game {
     const start = s0.pos.clone(); start.y += CFG.step.thickness / 2;
     this.player.reset(start);
     this.player.faceDir(this.stairs.requiredDir(0) ?? 0);
+    this.player.showBack = true;       // menu = cute climbing-back hero (never occluded)
     this.runBias = 0; this.camAz = CFG.camera.baseAz;
     this.groundPos.copy(start);
     this.desiredCam(this.camPos); this.camera.position.copy(this.camPos);
@@ -162,6 +163,7 @@ export class Game {
     this.player.faceDir(this.lastDir);
     this.buffered = null;
     this.grooveCombo = 0; this._lastBeat = -1; this.lastGrade = 'off';
+    this.player.showBack = true;       // gameplay = cute climbing back view
     this.runBias = 0; this.camAz = CFG.camera.baseAz;
     this.groundPos.copy(start);
     this.postfx.fade = 0;
@@ -326,9 +328,10 @@ export class Game {
     this.groundPos.lerp(this._occP, clamp(dt * 6, 0, 1));
 
     // camera azimuth eases VERY gently toward the run bias (rotation is the main
-    // vertigo source, so keep it small & slow)
-    const targetAz = CFG.camera.baseAz + this.runBias * CFG.camera.maxYaw;
-    this.camAz += (targetAz - this.camAz) * (this.state === 'playing' ? CFG.camera.yawFollow : 0.02);
+    // vertigo source, so keep it small & slow). Menu sits at the face-on angle.
+    const targetAz = this.state === 'playing'
+      ? CFG.camera.baseAz + this.runBias * CFG.camera.maxYaw : CFG.camera.baseAz;
+    this.camAz += (targetAz - this.camAz) * (this.state === 'playing' ? CFG.camera.yawFollow : 0.06);
 
     // camera follow (skip strong follow while dying so we watch the tumble)
     this.desiredCam(this._tmp);

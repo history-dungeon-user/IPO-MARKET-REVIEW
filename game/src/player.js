@@ -157,6 +157,7 @@ export class Player {
     this.stalkGrp.add(this.orbLight);
     this.antSpring = new Spring(90, 8);
 
+    this.showBack = false;   // game toggles: true in play (back view), false on menu
     this.reset(new Vector3());
   }
 
@@ -289,8 +290,10 @@ export class Player {
 
     // --- face cheats toward the LIVE camera azimuth regardless of body yaw ---
     // (game.js feeds the current camera azimuth; falls back to the neutral iso)
+    // In back view we don't cheat the face to camera — the body's front faces
+    // the way it's climbing, so we see the cute 3/4 back (ears, tail, antenna).
     const camAz = (this.faceCamAz != null) ? this.faceCamAz : CAM_AZ;
-    this.faceGrp.rotation.y = camAz - this.yaw;
+    this.faceGrp.rotation.y = this.showBack ? 0 : (camAz - this.yaw);
     this._updateBlink(dt);
 
     // --- squash/stretch state machine: drive vertical scale sy (sxz derived, volume-preserving) ---

@@ -86,8 +86,10 @@ export class Sky {
   constructor(scene) {
     this.scene = scene;
     this.t = 0;                 // day cycle phase [0..N)
-    // raking sun, lifted higher so it sits in the open upper sky (not behind the tower)
-    this.sunDir = new Vector3(-0.52, 0.56, -0.60).normalize();
+    // Sun up the stairs (+X+Z, high): visible ahead in the back-view climb (a
+    // "toward the light" rim), and front-lighting the face on the menu (which
+    // views from the +X+Z side). Works for both camera angles.
+    this.sunDir = new Vector3(0.45, 0.62, 0.50).normalize();
 
     const geo = new SphereGeometry(200, 48, 32);
     this.mat = new ShaderMaterial({

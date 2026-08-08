@@ -7,10 +7,11 @@ import { RHYTHM, rhythmFlip } from './config.js';
 
 // C-major pentatonic phrase (semitone offsets from a root), a 24-note motif with a
 // rising/falling contour. Notes: C D E G A across ~2 octaves. No 4th/7th => never clashes.
+// The TUNE the player performs: one tap = the next note. A pleasant looping
+// pentatonic phrase (C D E G A across ~2 octaves) with a rising/falling contour
+// that resolves home, so any run of taps sounds musical and loops seamlessly.
 const PENTA = [0, 2, 4, 7, 9, 12, 14, 12, 9, 7, 9, 12,
                16, 14, 12, 9, 7, 4, 2, 4, 7, 9, 4, 0];
-// A gentle pentatonic arp line for the song's lead (one note per 8th note).
-const LEAD = [12, 16, 19, 16, 14, 12, 9, 12, 16, 14, 12, 9, 7, 9, 12, 9];
 // Slow chord progression (root semitone offsets): I - vi - IV - V. Advances per bar.
 const PROG = [0, 9, 5, 7];
 const ROOT = 130.81; // C3
@@ -147,23 +148,16 @@ export class Audio {
     }
 
     // --- Chord-pad stabs (root + fifth + octave => neutral, never a wrong 3rd) on beats 1 & 3 ---
+    // These + the drums + bass are the BED the player performs the melody over. NO auto-lead:
+    // the tapped melody in step() is the song's lead, so nothing here competes with it.
     if (pos === 0 || pos === 8) {
-      this._voice('triangle', chordF, t, 0.32, 0.10, song, -6, 0.12);
-      this._voice('sine', chordF * 1.5, t, 0.30, 0.06, song, 0, 0.12);
-      this._voice('sine', chordF * 2, t, 0.26, 0.05, song, 0, 0.12);
+      this._voice('triangle', chordF, t, 0.32, 0.09, song, -6, 0.10);
+      this._voice('sine', chordF * 1.5, t, 0.30, 0.05, song, 0, 0.10);
+      this._voice('sine', chordF * 2, t, 0.26, 0.04, song, 0, 0.10);
     }
-
-    // --- Gentle lead arp: one pentatonic note per 8th, brighter/longer on accents (the "fills") ---
-    if (pos % 2 === 0) {
-      const semi = LEAD[(step / 2) % LEAD.length | 0] ?? 12;
-      const f = ROOT * Math.pow(2, semi / 12);
-      if (accent) {
-        this._voice('triangle', f, t, 0.42, 0.14, song, -4, 0.4);
-        this._voice('sine', f * 2, t, 0.30, 0.06, song, 0, 0.32); // shimmer octave on the turn
-      } else {
-        this._voice('triangle', f, t, 0.20, 0.07, song, -3, 0.14);
-      }
-    }
+    // A soft open-hat sparkle marks accent ("turn") grid positions without adding pitched
+    // content that would clash with the player's lead.
+    if (accent && pos % 2 !== 0) this._hat(t, 0.05, true, song);
   }
 
   // beatPhase — fractional position within the current beat, in [0,1). 0 = on a beat.
@@ -191,32 +185,36 @@ export class Audio {
 
   // ======================= PLAYER TAP ACCENT ==============================
 
-  // step() is the per-tap ACCENT — a melodic pluck layered over the self-playing song.
-  // It does NOT advance the song (the transport owns tempo). info.grade shapes it.
+  // step() is the PLAYER PERFORMING THE MELODY — one tap = the next note of the tune.
+  // A prominent marimba/bell pluck that sits clearly above the backing bed. It does NOT
+  // advance the song (the transport owns tempo). info.grade shapes tone; info.turned = bigger.
   step(combo, info = {}) {
     if (!this.ready || this.muted) return;
     const t = this.ctx.currentTime;
     const turned = !!info.turned;
     const grade = info.grade || 'good';
 
-    // Accent note from the looping pentatonic phrase, an octave over the bass.
+    // Next note of the looping pentatonic tune, an octave over the bass so it rings out.
     const semi = PENTA[this.melIdx % PENTA.length];
     this.melIdx++;
     const freq = ROOT * Math.pow(2, (semi + 12) / 12);
 
-    // Grade shapes brightness / length / reverb: perfect = rich & long, off = dull & short.
+    // Grade shapes brightness / length / reverb: perfect = brightest & longest, off = dull & short.
     let g, dur, sp, rich;
-    if (grade === 'perfect') { g = 0.26; dur = 0.52; sp = 0.42; rich = 2; }
-    else if (grade === 'off') { g = 0.14; dur = 0.16; sp = 0.05; rich = 0; }
-    else { g = 0.20; dur = 0.28; sp = 0.18; rich = 1; } // 'good'
+    if (grade === 'perfect') { g = 0.40; dur = 0.60; sp = 0.42; rich = 2; }
+    else if (grade === 'off') { g = 0.24; dur = 0.20; sp = 0.06; rich = 0; }
+    else { g = 0.32; dur = 0.34; sp = 0.20; rich = 1; } // 'good'
     if (turned) { g *= 1.15; dur *= 1.18; sp = Math.min(0.5, sp + 0.1); } // turns a touch bigger
 
+    // Marimba/bell lead: a triangle body + a bright sine harmonic partial, mallet-fast attack.
     this._voice('triangle', freq, t, dur, g, this.bus, turned ? -6 : -4, sp);
+    this._voice('sine', freq * 3, t, dur * 0.45, g * 0.28, this.bus, 0, sp * 0.5); // struck-bar overtone
     if (rich >= 2) {
-      this._voice('sine', freq * 1.5, t, dur * 0.8, g * 0.5, this.bus, 0, sp);   // fifth
-      this._voice('sine', freq * 2, t, dur * 0.6, g * 0.4, this.bus, 0, sp);     // octave
+      this._voice('sine', freq * 1.5, t, dur * 0.85, g * 0.5, this.bus, 0, sp);    // fifth
+      this._voice('sine', freq * 2, t, dur * 0.65, g * 0.45, this.bus, 0, sp);     // octave
+      this._voice('sine', freq * 4, t, dur * 0.3, g * 0.14, this.bus, 0, sp);      // shimmer
     } else if (rich >= 1) {
-      this._voice('sine', freq * 2, t, dur * 0.7, g * 0.35, this.bus, 0, sp * 0.5);
+      this._voice('sine', freq * 2, t, dur * 0.7, g * 0.4, this.bus, 0, sp * 0.5); // octave sparkle
     }
     this._duckPad(t);
   }

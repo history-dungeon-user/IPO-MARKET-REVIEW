@@ -8,7 +8,7 @@ export class Input {
     this.onAction = onAction;
     this.enabled = false;
     this.last = 0;
-    this.DEBOUNCE = 55;           // ms — well under a real tap interval, kills dupes
+    this.DEBOUNCE = 32;           // ms — kills simultaneous dupes but never eats fast taps
 
     const fire = (clientX) => {
       const now = performance.now();

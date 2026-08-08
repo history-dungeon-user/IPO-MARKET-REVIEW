@@ -34,15 +34,18 @@ export const CFG = {
     offsetY: 12.6,         // elevation: climb reads as a column, hero stays clear
     // Azimuth tracks the recent run direction so the tower stays centred and
     // the empty dead-space on long straight runs collapses.
-    baseAz: Math.PI / 4,   // 45deg neutral iso
+    // Gameplay uses a BEHIND-the-hero view (225°): the character is nearest the
+    // lens so stairs can never occlude it, and we see its cute climbing back.
+    baseAz: Math.PI * 1.25,   // 225deg — camera behind, looking up the stairs
+    menuAz: Math.PI / 4,      // 45deg — menu shows the FACE (hero portrait)
     maxYaw: 0.14,          // tiny recentre swing — rotation is the main vertigo source
     yawFollow: 0.03,       // very slow so it never feels like the world is turning
-    // look target = player + (fwd, up, fwd): seats the character low, lens up.
-    look: { fwd: 1.9, up: 3.15 },
+    // look target = player + (fwd, up, fwd): looks UP the stairs, hero low-front.
+    look: { fwd: 2.4, up: 3.0 },
     follow: 0.11,          // lerp factor
     shake: 0.0,
-    // menu hero framing: closer & lower so the mascot reads as the star
-    menu: { radiusXZ: 12.5, offsetY: 8.4, lookFwd: 0.6, lookUp: 2.35 },
+    // menu hero framing: a close cute back/3-quarter of the climber, stairs behind
+    menu: { radiusXZ: 12.5, offsetY: 8.2, lookFwd: 1.6, lookUp: 1.05 },
   },
 };
 
