@@ -90,10 +90,13 @@ export class Stairs {
     return ((x >>> 0) / 4294967296);
   }
 
-  // Direction is laid out on the beat grid: the shared rhythm motif decides
-  // whether the step at this index flips, so turns fall on the music's accents.
+  // Direction follows the LOADED SONG's structure when a turn map is present
+  // (turns ride the song's accents/phrasing); otherwise the built-in rhythm motif.
   _advance() {
-    if (rhythmFlip(this.index)) this.dir ^= 1;
+    let flip;
+    if (this.turnMap && this.turnMap.length) flip = this.turnMap[this.index % this.turnMap.length];
+    else flip = rhythmFlip(this.index);
+    if (flip) this.dir ^= 1;
     this._push(this.dir, false);
   }
 

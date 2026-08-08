@@ -36,6 +36,16 @@ export class Audio {
     this.userMode = false;      // is a user-loaded song the active bed?
     this.userBuffer = null;     // decoded AudioBuffer of the user's song
     this.userSource = null;     // the live looping AudioBufferSourceNode (if playing)
+
+    // --- Performed-song mode (Piano-Tiles style): each tap plays the next beat-slice ---
+    this.performed = false;     // true whenever a song buffer is loaded (default or user)
+    this.songBuffer = null;     // decoded AudioBuffer the taps perform
+    this.songDur = 0;           // its duration in seconds
+    this.songSegDur = 0;        // one segment (beat) length = 60 / detectedBpm
+    this.songPos = 0;           // play head: where the next tapped slice starts
+    this.turnMap = [];          // 0/1 per segment: where the stairs should flip
+    this._segSource = null;     // currently-sounding slice source
+    this._segGain = null;       // its gain node (for click-free stop)
   }
 
   init() {
@@ -118,43 +128,45 @@ export class Audio {
 
   // ======================= USER SONG (player's own track) =================
 
-  // Decode raw audio bytes into a loopable buffer, auto-detect its tempo so the stairs
-  // sync without the player tapping, and switch to user-song mode.
+  // Decode raw audio bytes, auto-detect its tempo, and enter PERFORMED-SONG mode:
+  // from now on each tapped step plays the next beat-slice of this song, and the
+  // stairs flip on the turnMap derived from the song's structure. No transport runs.
   // Returns the detected BPM (number) on success, false if decoding fails.
   async loadUserSong(arrayBuffer) {
     if (!this.ctx || !arrayBuffer) return false;
     try {
       const buf = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
-      this.userBuffer = buf;
-      this.userMode = true;
-      // Estimate tempo from the audio and lock the beat grid to it.
+      if (!buf || !buf.length) return false; // empty/degenerate decode
+      // Estimate tempo and lock the beat grid to it.
       const detected = this._detectBpm(buf);
-      this.setTempo(detected); // clamps + realigns the clock; also stores this.bpm
-      // If the transport is already playing, swap the bed to the user song right now.
-      if (this.running) this._startUserSource();
+      this.setTempo(detected); // clamps + stores this.bpm
+      // Stop any procedural transport/bed — performed mode is silent until a tap.
+      this._stopTransport(); this._stopUserSource(); this._stopSegSource();
+      // Enter performed-song mode.
+      this.userBuffer = buf; this.userMode = true; // kept for back-compat
+      this.performed = true;
+      this.songBuffer = buf;
+      this.songDur = buf.duration;
+      this.songSegDur = 60 / detected;             // one beat per tapped segment
+      this.songPos = 0;
+      this.turnMap = this._buildTurnMap(buf, this.songSegDur);
       return detected;
     } catch (e) {
       return false;
     }
   }
 
-  // Compact, dependency-free BPM estimator over a decoded AudioBuffer.
-  // Energy-envelope onset detection + autocorrelation; folds into a musical range.
-  // Falls back to RHYTHM.bpm on short/quiet/degenerate input.
-  _detectBpm(buf) {
-    const FALLBACK = RHYTHM.bpm;
-    if (!buf || !buf.length || !buf.sampleRate) return FALLBACK;
+  // Compact onset envelope over a decoded AudioBuffer (shared by tempo + turnMap).
+  // ~11.6ms RMS frames, positive first-difference. Returns null on short/bad input.
+  _onsetEnv(buf) {
+    if (!buf || !buf.length || !buf.sampleRate) return null;
     const sr = buf.sampleRate;
     const ch0 = buf.getChannelData(0);
     const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
-
-    // Analyze at most the first ~60s for speed.
-    const N = Math.min(ch0.length, Math.floor(sr * 60));
-    const hop = Math.max(1, Math.floor(sr * 0.0116)); // ~11.6ms frames
+    const N = Math.min(ch0.length, Math.floor(sr * 60)); // first ~60s for speed
+    const hop = Math.max(1, Math.floor(sr * 0.0116));    // ~11.6ms frames
     const frames = Math.floor(N / hop);
-    if (frames < 16) return FALLBACK; // too short to judge
-
-    // 1) Per-frame RMS energy (mix ch1 in if stereo).
+    if (frames < 16) return null;
     const energy = new Float32Array(frames);
     for (let f = 0; f < frames; f++) {
       let sum = 0; const base = f * hop;
@@ -165,60 +177,142 @@ export class Audio {
       }
       energy[f] = Math.sqrt(sum / hop);
     }
-
-    // 2) Onset envelope = positive first-difference, then mean-remove.
     const onset = new Float32Array(frames);
-    let mean = 0;
-    for (let f = 1; f < frames; f++) {
-      const d = energy[f] - energy[f - 1];
-      onset[f] = d > 0 ? d : 0;
-      mean += onset[f];
-    }
-    mean /= frames;
-    let energyAcc = 0;
-    for (let f = 0; f < frames; f++) { onset[f] -= mean; energyAcc += onset[f] * onset[f]; }
-    if (energyAcc <= 1e-9) return FALLBACK; // signal too quiet / flat
+    for (let f = 1; f < frames; f++) { const d = energy[f] - energy[f - 1]; onset[f] = d > 0 ? d : 0; }
+    return { onset, frameDur: hop / sr, frames };
+  }
 
-    // 3) Autocorrelate over lags for 60–190 BPM; pick the strongest lag.
-    const frameDur = hop / sr; // seconds per frame
+  // Compact, dependency-free BPM estimator: onset envelope + autocorrelation,
+  // folded into a musical range. Falls back to RHYTHM.bpm on short/quiet/degenerate input.
+  _detectBpm(buf) {
+    const FALLBACK = RHYTHM.bpm;
+    const env = this._onsetEnv(buf);
+    if (!env) return FALLBACK;
+    const { onset, frameDur, frames } = env;
+
+    // Mean-remove the onset envelope for a well-behaved autocorrelation.
+    let mean = 0; for (let f = 0; f < frames; f++) mean += onset[f]; mean /= frames;
+    const oc = new Float32Array(frames); let energyAcc = 0;
+    for (let f = 0; f < frames; f++) { oc[f] = onset[f] - mean; energyAcc += oc[f] * oc[f]; }
+    if (energyAcc <= 1e-9) return FALLBACK; // too quiet / flat
+
+    // Autocorrelate over lags for 60–190 BPM; pick the strongest lag.
     const lagFor = (bpm) => Math.round(60 / (bpm * frameDur));
-    const minLag = lagFor(190); // fast tempo => small lag
-    const maxLag = lagFor(60);  // slow tempo => large lag
+    const minLag = lagFor(190), maxLag = lagFor(60);
     if (maxLag >= frames || minLag < 1) return FALLBACK;
-
-    const corr = (lag) => {
-      let c = 0;
-      for (let f = lag; f < frames; f++) c += onset[f] * onset[f - lag];
-      return c;
-    };
-
+    const corr = (lag) => { let c = 0; for (let f = lag; f < frames; f++) c += oc[f] * oc[f - lag]; return c; };
     let bestLag = -1, bestC = -Infinity;
-    for (let lag = minLag; lag <= maxLag; lag++) {
-      const c = corr(lag);
-      if (c > bestC) { bestC = c; bestLag = lag; }
-    }
+    for (let lag = minLag; lag <= maxLag; lag++) { const c = corr(lag); if (c > bestC) { bestC = c; bestLag = lag; } }
     if (bestLag < 1 || bestC <= 0) return FALLBACK;
 
     let bpm = 60 / (bestLag * frameDur);
-
-    // 4) Fold into a sensible tap range using the octave with the stronger support.
+    // Fold into a sensible tap range using the octave with stronger support.
     if (bpm < 90) {
       const dbl = bpm * 2;
       if (dbl <= 190) { const cd = corr(Math.round(lagFor(dbl))); if (cd >= bestC * 0.6) bpm = dbl; }
-    } else if (bpm > 180) {
-      bpm = bpm / 2;
-    }
+    } else if (bpm > 180) { bpm = bpm / 2; }
 
     bpm = Math.round(bpm);
     if (!isFinite(bpm) || bpm < 60 || bpm > 190) return FALLBACK;
     return bpm;
   }
 
-  // Drop the user's song; the next transport start uses the procedural arrangement again.
+  // Build the stair turn map: one 0/1 per beat-segment across the song. Turns ride the
+  // song's accents (onset peaks above ~mean+0.6*std), then enforced for playability:
+  // at least 1 segment between turns, and a forced turn if >5 segments pass without one.
+  _buildTurnMap(buf, segDur) {
+    const nSeg = segDur > 0 ? Math.floor((buf && buf.duration || 0) / segDur) : 0;
+    if (nSeg < 1) return [];
+    const map = new Array(nSeg).fill(0);
+    const env = this._onsetEnv(buf);
+    if (env) {
+      const { onset, frameDur } = env;
+      // Bin onset energy into segments.
+      const segE = new Float32Array(nSeg);
+      for (let f = 0; f < onset.length; f++) {
+        const seg = Math.floor(f * frameDur / segDur);
+        if (seg >= 0 && seg < nSeg) segE[seg] += onset[f];
+      }
+      // Threshold at mean + 0.6*std; mark local peaks as candidate turns.
+      let mean = 0; for (let i = 0; i < nSeg; i++) mean += segE[i]; mean /= nSeg;
+      let varr = 0; for (let i = 0; i < nSeg; i++) { const d = segE[i] - mean; varr += d * d; } varr /= nSeg;
+      const thr = mean + 0.6 * Math.sqrt(varr);
+      for (let i = 1; i < nSeg - 1; i++) {
+        if (segE[i] >= thr && segE[i] >= segE[i - 1] && segE[i] >= segE[i + 1]) map[i] = 1;
+      }
+    }
+    // Playability pass: min 1 segment between turns; force one after >5 without a turn.
+    let last = 0; // origin segment never flips
+    for (let i = 1; i < nSeg; i++) {
+      if (map[i]) { if (i - last < 2) map[i] = 0; else last = i; } // too close => drop
+      if (i - last > 5) { map[i] = 1; last = i; }                  // too long => force
+    }
+    map[0] = 0;
+    return map;
+  }
+
+  // Drop the user's song and leave performed mode; the procedural fallback returns.
   clearUserSong() {
     this._stopUserSource();
+    this._stopSegSource();
     this.userMode = false;
     this.userBuffer = null;
+    this.performed = false;
+    this.songBuffer = null;
+    this.songDur = 0;
+    this.songPos = 0;
+    this.turnMap = [];
+  }
+
+  // ======================= PERFORMED SONG PLAYBACK ========================
+
+  // Core of performed mode: play the NEXT beat-slice of the song from the current
+  // play head. Continuous if tapped in time, gaps if late, silence if not tapped.
+  playNextSegment() {
+    if (!this.ready || this.muted || !this.performed || !this.songBuffer || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    const seg = this.songSegDur;
+    if (!(seg > 0)) return;
+    // Quick fade of the previous slice to avoid clicks.
+    this._stopSegSource(now, 0.006);
+    // New slice: buffer -> gain (short attack + release) -> master/soft-clip bus.
+    const src = this.ctx.createBufferSource(); src.buffer = this.songBuffer;
+    const g = this.ctx.createGain();
+    const end = now + seg * 1.15;
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.linearRampToValueAtTime(1.0, now + 0.004);                       // ~4ms attack
+    g.gain.setValueAtTime(1.0, Math.max(now + 0.004, end - 0.03));
+    g.gain.exponentialRampToValueAtTime(0.0001, end);                        // short release
+    src.connect(g); g.connect(this.bus);
+    src.start(now, Math.max(0, Math.min(this.songPos, Math.max(0, this.songDur - 0.01))));
+    src.stop(end + 0.02);
+    src.onended = () => { if (this._segSource === src) { this._segSource = null; this._segGain = null; } };
+    this._segSource = src; this._segGain = g;
+    // Advance the play head; wrap near the end so it loops seamlessly.
+    this.songPos += seg;
+    if (this.songPos >= this.songDur - seg) this.songPos = 0;
+  }
+
+  // Stop the current slice with a tiny fade (default) so it never clicks.
+  _stopSegSource(at, fade = 0.006) {
+    if (!this._segSource) return;
+    const src = this._segSource, g = this._segGain;
+    const t = (at != null) ? at : this.ctx.currentTime;
+    if (g) {
+      try {
+        g.gain.cancelScheduledValues(t);
+        g.gain.setValueAtTime(Math.max(0.0001, g.gain.value), t);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + fade);
+      } catch (e) { /* noop */ }
+    }
+    try { src.stop(t + fade + 0.01); } catch (e) { /* already stopped */ }
+    this._segSource = null; this._segGain = null;
+  }
+
+  // Rewind the performed song to the top (stops the current slice cleanly).
+  resetSong() {
+    this._stopSegSource();
+    this.songPos = 0;
   }
 
   // Set the tempo the scheduler/clock read; realign to a fresh downbeat NOW so the beat
@@ -354,9 +448,8 @@ export class Audio {
     const turned = !!info.turned;
     const grade = info.grade || 'good';
 
-    // In user-song mode, a pitched pentatonic lead could clash with an arbitrary track,
-    // so play a NEUTRAL percussive tick (filtered noise click) shaped by grade instead.
-    if (this.userMode) { this._tick(t, grade, turned); return; }
+    // PERFORMED-SONG MODE: the tap IS the sound — play the next beat-slice, nothing else.
+    if (this.performed) { this.playNextSegment(); return; }
 
     // Next note of the looping pentatonic tune, an octave over the bass so it rings out.
     const semi = PENTA[this.melIdx % PENTA.length];
@@ -494,9 +587,10 @@ export class Audio {
     f.frequency.exponentialRampToValueAtTime(200, t + 0.6);
     g.gain.setValueAtTime(0.24, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
     o.connect(f); f.connect(g); g.connect(this.bus); o.start(t); o.stop(t + 0.7);
-    // Stop the transport and duck the whole song bed away.
+    // Stop the transport / bed / performed slice so nothing lingers after a fall.
     this._stopTransport();
-    this._stopUserSource(); // clear the user track so it doesn't linger after a fall
+    this._stopUserSource();
+    this._stopSegSource();
     this.melIdx = 0;
     this._songLevel = 0.0;
     if (this.songGain) {
@@ -528,9 +622,12 @@ export class Audio {
     });
   }
 
-  // setPad(true) STARTS the song (transport + fade in); setPad(false) STOPS/ducks it.
+  // setPad(true) STARTS the procedural song (transport + fade in); setPad(false) STOPS it.
+  // In PERFORMED-SONG mode there is no auto-transport: the song stays silent until the
+  // player taps, so setPad is a no-op (aside from making sure nothing procedural lingers).
   setPad(on) {
     if (!this.ready) return;
+    if (this.performed) { if (!on) { this._stopTransport(); this._stopUserSource(); } return; }
     const t = this.ctx.currentTime;
     if (on) {
       this._startTransport();
