@@ -147,6 +147,9 @@ export class Audio {
       this.hasSong = true;
       this.songBuffer = buf;
       this.songDur = buf.duration;
+      // The pad is a procedural-fallback layer; in song mode it would just hum
+      // ("웅") under the track, so silence it — the song is the music.
+      if (this.padGain) this.padGain.gain.value = 0.0;
 
       // Use a valid precomputed beatmap if given; otherwise auto-analyze the audio.
       const valid = beatmap && Number.isFinite(beatmap.bpm) && Array.isArray(beatmap.turnMap);
@@ -292,6 +295,7 @@ export class Audio {
     this.songBuffer = null;
     this.songDur = 0;
     this.turnMap = [];
+    if (this.padGain) this.padGain.gain.value = this._padLevel; // pad returns for procedural mode
   }
 
   // ======================= CONTINUOUS SONG PLAYBACK =======================

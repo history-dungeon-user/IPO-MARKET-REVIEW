@@ -220,8 +220,8 @@ export class Game {
   }
 
   startGame() {
-    this.audio.init(); this.audio.resume(); this.audio.setPad(true);
-    if (this.audio.resetSong) this.audio.resetSong();      // song restarts from the top
+    this.audio.init(); this.audio.resume();
+    this.audio.setPad(true);   // (re)starts the song from the top, aligned to the grid
     // when a song is loaded, the stairs' turns follow the song's structure
     this.stairs.turnMap = (this.audio.hasSong && this.audio.turnMap) ? this.audio.turnMap : null;
     this.state = 'playing';
