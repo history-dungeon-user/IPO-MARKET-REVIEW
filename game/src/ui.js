@@ -9,6 +9,8 @@ export class UI {
     this.stamina = $('stamina');
     this.staminaFill = $('staminaFill');
     this.combo = $('combo');
+    this.judge = $('judge');
+    this.beat = $('beat');
     this.flash = $('flash');
     this.start = $('startScreen');
     this.over = $('overScreen');
@@ -65,6 +67,23 @@ export class UI {
     this.combo.classList.remove('show');
     void this.combo.offsetWidth;
     this.combo.classList.add('show');
+  }
+
+  // metronome pulse each beat; tints mint while the player holds an on-beat groove
+  pulseBeat(groove = 0) {
+    if (!this.beat) return;
+    this.beat.classList.remove('pulse');
+    this.beat.classList.toggle('groove', groove >= 3);
+    void this.beat.offsetWidth;
+    this.beat.classList.add('pulse');
+  }
+
+  showJudge(text, cls) {
+    if (!this.judge) return;
+    this.judge.textContent = text;
+    this.judge.className = '';
+    void this.judge.offsetWidth;
+    this.judge.classList.add(cls, 'show');
   }
 
   doFlash(alpha = 0.5, ms = 90) {

@@ -74,6 +74,33 @@ export const PALETTE = {
   ],
 };
 
+// --- Rhythm / music-driven design ---------------------------------------
+// A fixed-tempo song plays; the staircase's turn pattern is laid out ON the
+// beat grid (a `1` = flip direction on that step). Both the stairs and the
+// backing track's accents read from these motifs, so stepping in time lands
+// turns on the musical accents — a rhythm-game feel with the same L/R buttons.
+export const RHYTHM = {
+  bpm: 96,
+  sectionSteps: 16,           // steps per motif before advancing to the next
+  patterns: [
+    [0,0,1,0, 0,1,0,0, 1,0,0,1, 0,0,1,0],   // A — sparse, easy groove
+    [0,1,0,1, 0,0,1,0, 1,0,0,1, 0,1,0,1],   // B — busier
+    [1,0,1,0, 0,1,0,1, 1,0,0,1, 0,1,1,0],   // C — syncopated
+  ],
+  // on-beat judging windows (seconds from the nearest beat)
+  perfect: 0.085,
+  good: 0.17,
+};
+
+// The flip decision for the step at absolute index `i` (0 = origin, never flips).
+export function rhythmFlip(i) {
+  if (i <= 0) return 0;
+  const secLen = RHYTHM.sectionSteps;
+  const sec = Math.floor((i - 1) / secLen) % RHYTHM.patterns.length;
+  const pos = (i - 1) % secLen;
+  return RHYTHM.patterns[sec][pos] ? 1 : 0;
+}
+
 export const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 export const lerp = (a, b, t) => a + (b - a) * t;
 export const easeOutBack = (t) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };

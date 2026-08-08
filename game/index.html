@@ -49,6 +49,30 @@
     box-shadow: 0 0 14px rgba(255,224,138,.6); transition: background .3s; }
   .stamina.low > i { background: linear-gradient(90deg,#ff6b6b,#ff9d5c); box-shadow:0 0 16px rgba(255,90,90,.7); }
 
+  /* metronome beat pulse under the stamina bar */
+  #beat { width:13px; height:13px; border-radius:50%; margin-top:13px;
+    background: rgba(255,244,224,.22); box-shadow: 0 0 0 2px rgba(255,244,224,.16); }
+  #beat.pulse { animation: beatpulse .5s ease-out; }
+  @keyframes beatpulse {
+    0% { transform: scale(2.0); background: var(--gold); box-shadow: 0 0 16px rgba(255,217,138,.9); }
+    100% { transform: scale(1); background: rgba(255,244,224,.22); box-shadow: 0 0 0 2px rgba(255,244,224,.16); } }
+  #beat.groove.pulse { animation: beatpulseG .5s ease-out; }
+  @keyframes beatpulseG {
+    0% { transform: scale(2.2); background:#7bffcf; box-shadow:0 0 20px rgba(123,255,207,.9); }
+    100% { transform: scale(1); background: rgba(255,244,224,.22); box-shadow: 0 0 0 2px rgba(255,244,224,.16); } }
+
+  /* on-beat judgement call-out near the character */
+  #judge { position: fixed; left:50%; top:55%; transform: translate(-50%,-50%);
+    pointer-events:none; font-size: clamp(17px,4.8vw,26px); font-weight:900;
+    letter-spacing:.06em; opacity:0; }
+  #judge.perfect { color:#8fffd6; text-shadow:0 2px 12px rgba(0,0,0,.5), 0 0 18px rgba(123,255,207,.6); }
+  #judge.good { color: var(--gold); text-shadow:0 2px 12px rgba(0,0,0,.5); }
+  #judge.show { animation: judgepop .5s ease-out; }
+  @keyframes judgepop {
+    0% { opacity:0; transform: translate(-50%,-40%) scale(.7); }
+    25% { opacity:1; transform: translate(-50%,-54%) scale(1.06); }
+    100% { opacity:0; transform: translate(-50%,-72%) scale(1); } }
+
   #combo { position: fixed; left:50%; top: 40%; transform: translate(-50%,-50%) scale(.6);
     font-size: clamp(26px,7vw,46px); font-weight:900; letter-spacing:.02em; opacity:0;
     color: var(--gold); text-shadow: 0 3px 18px rgba(0,0,0,.5); pointer-events:none; }
@@ -130,9 +154,11 @@
     <div class="best-line">BEST <span id="best">0</span></div>
   </div>
   <div class="stamina" id="stamina"><i id="staminaFill"></i></div>
+  <div id="beat"></div>
 </div>
 
 <div id="combo"></div>
+<div id="judge"></div>
 <div class="flash" id="flash"></div>
 
 <div class="touchzones" id="touchzones">

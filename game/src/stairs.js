@@ -5,7 +5,7 @@ import {
   Group, MeshStandardMaterial, Mesh, Color, Vector3, DoubleSide,
 } from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { CFG, PALETTE } from './config.js';
+import { CFG, PALETTE, rhythmFlip } from './config.js';
 
 // A step material that (a) tints top faces lighter than sides and (b) adds a
 // soft sky-tinted fresnel rim so edges catch the light like a real toy render.
@@ -90,12 +90,10 @@ export class Stairs {
     return ((x >>> 0) / 4294967296);
   }
 
-  // Decide the next direction, then place a step there.
+  // Direction is laid out on the beat grid: the shared rhythm motif decides
+  // whether the step at this index flips, so turns fall on the music's accents.
   _advance() {
-    let flip = false;
-    if (this.runLen >= CFG.minRun && this._rand() < CFG.turnChance) flip = true;
-    if (CFG.maxRun && this.runLen >= CFG.maxRun) flip = true;   // never lean too far
-    if (flip) { this.dir ^= 1; this.runLen = 0; } else { this.runLen++; }
+    if (rhythmFlip(this.index)) this.dir ^= 1;
     this._push(this.dir, false);
   }
 

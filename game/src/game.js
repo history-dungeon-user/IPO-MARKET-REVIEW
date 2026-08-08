@@ -2,7 +2,7 @@ import {
   Scene, PerspectiveCamera, WebGLRenderer, Vector3, ACESFilmicToneMapping,
   PCFSoftShadowMap, SRGBColorSpace, MathUtils, DirectionalLight, Color,
 } from 'three';
-import { CFG, PALETTE, clamp, lerp } from './config.js';
+import { CFG, PALETTE, RHYTHM, clamp, lerp } from './config.js';
 import { Sky } from './sky.js';
 import { Stairs } from './stairs.js';
 import { Player } from './player.js';
@@ -161,6 +161,7 @@ export class Game {
     this.stamina = CFG.stamina.start; this.lastDir = this.stairs.requiredDir(0) ?? 0;
     this.player.faceDir(this.lastDir);
     this.buffered = null;
+    this.grooveCombo = 0; this._lastBeat = -1; this.lastGrade = 'off';
     this.runBias = 0; this.camAz = CFG.camera.baseAz;
     this.groundPos.copy(start);
     this.postfx.fade = 0;
@@ -208,9 +209,30 @@ export class Game {
     const gain = Math.max(sc.gainMin, sc.gainPerStep + sc.gainRamp * this.score);
     this.stamina = clamp(this.stamina + gain, 0, sc.max);
 
+    // --- rhythm judging: how close was this tap to the beat? ---
+    const err = this.audio.nearestBeatError ? Math.abs(this.audio.nearestBeatError()) : 999;
+    let grade = 'off';
+    if (err <= RHYTHM.perfect) grade = 'perfect';
+    else if (err <= RHYTHM.good) grade = 'good';
+    this.lastGrade = grade;
+
+    // reward staying on the beat with extra stamina + a call-out (never punish off-beat)
+    const nowMs = performance.now();
+    if (grade === 'perfect') {
+      this.grooveCombo = (this.grooveCombo || 0) + 1;
+      this.stamina = clamp(this.stamina + 0.032, 0, CFG.stamina.max);
+      if (nowMs - (this._judgeAt || 0) > 200) { this.ui.showJudge('PERFECT', 'perfect'); this._judgeAt = nowMs; }
+    } else if (grade === 'good') {
+      this.grooveCombo = (this.grooveCombo || 0) + 1;
+      this.stamina = clamp(this.stamina + 0.014, 0, CFG.stamina.max);
+      if (this.grooveCombo % 3 === 0 && nowMs - (this._judgeAt || 0) > 220) { this.ui.showJudge('GOOD', 'good'); this._judgeAt = nowMs; }
+    } else {
+      this.grooveCombo = 0;
+    }
+
     this.ui.setScore(this.score);
-    // the climb performs the music: each step advances the melody; turns accent
-    this.audio.step(this.combo, { turned, score: this.score });
+    // the song plays itself; each step lays an on-beat accent over it
+    this.audio.step(this.combo, { turned, score: this.score, grade });
     this.ui.hideHint();
 
     // combo call-outs & milestones
@@ -226,8 +248,11 @@ export class Game {
   onLand(st, dir) {
     // burst + juice on landing
     const at = st.pos.clone(); at.y += CFG.step.thickness / 2 + 0.05;
-    const c = this.sky._c.sun.clone().lerp(PALETTE.player.accent, 0.25);
-    this.bursts.burst(at, c, 14, 1.0);
+    // brighter, bigger burst when the step landed on the beat
+    const perfect = this.lastGrade === 'perfect', good = this.lastGrade === 'good';
+    const c = perfect ? PALETTE.player.accent.clone()
+                      : this.sky._c.sun.clone().lerp(PALETTE.player.accent, 0.25);
+    this.bursts.burst(at, c, perfect ? 26 : good ? 18 : 12, perfect ? 1.5 : 1.0);
     this.audio.land();
     this.shake = Math.min(0.6, this.shake + 0.08);
     this.ui.doFlash(0.12, 70);
@@ -282,6 +307,15 @@ export class Game {
     this.player.faceCamAz = this.camAz;   // keep the face turned to the lens
     this.player.update(dt, this.time);
     this.stairs.maintain(this.playerIndex);
+
+    // beat pulse cue so the player can feel the rhythm
+    if (this.audio.beatCount) {
+      const b = this.audio.beatCount();
+      if (b !== this._lastBeat) {
+        this._lastBeat = b;
+        if (this.state === 'playing') this.ui.pulseBeat(this.grooveCombo || 0);
+      }
+    }
 
     // Smooth the camera's ground anchor toward the CURRENT STEP (not the jump
     // arc) so the view glides steadily instead of bobbing with every hop — the

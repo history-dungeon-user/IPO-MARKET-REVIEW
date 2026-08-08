@@ -1,34 +1,38 @@
-// Two-zone touch (left half / right half) + keyboard. Emits 'left' | 'right'.
+// Unified Pointer-event input. Using pointerdown (instead of touchstart + mousedown)
+// eliminates the classic double-fire where one touch also emits a synthetic mouse
+// event. A short debounce additionally collapses any residual duplicate and any
+// near-simultaneous two-finger tap into a single action, so "left+right at once
+// then it stops" can't happen. Emits 'left' | 'right'.
 export class Input {
   constructor(el, onAction) {
     this.onAction = onAction;
     this.enabled = false;
+    this.last = 0;
+    this.DEBOUNCE = 55;           // ms — well under a real tap interval, kills dupes
 
-    const zone = (clientX) => (clientX < window.innerWidth / 2 ? 'left' : 'right');
+    const fire = (clientX) => {
+      const now = performance.now();
+      if (now - this.last < this.DEBOUNCE) return;   // ignore duplicate / simultaneous
+      this.last = now;
+      this.onAction(clientX < window.innerWidth / 2 ? 'left' : 'right');
+    };
 
-    this._touch = (e) => {
+    this._pointer = (e) => {
       if (!this.enabled) return;
-      // fire once per new touch point for rapid tapping
-      for (const t of e.changedTouches) {
-        this.onAction(zone(t.clientX));
-      }
+      if (e.pointerType === 'mouse' && e.button !== 0) return; // primary click only
+      fire(e.clientX);
       e.preventDefault();
     };
-    this._mouse = (e) => {
-      if (!this.enabled) return;
-      this.onAction(zone(e.clientX));
-    };
     this._key = (e) => {
-      if (!this.enabled) return;
-      if (e.repeat) return;
-      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') this.onAction('left');
-      else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') this.onAction('right');
+      if (!this.enabled || e.repeat) return;
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') fire(0);
+      else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') fire(window.innerWidth);
     };
 
-    el.addEventListener('touchstart', this._touch, { passive: false });
-    el.addEventListener('mousedown', this._mouse);
+    // pointerdown covers mouse, touch and pen with one code path
+    el.addEventListener('pointerdown', this._pointer, { passive: false });
     window.addEventListener('keydown', this._key);
   }
-  enable() { this.enabled = true; }
+  enable() { this.enabled = true; this.last = 0; }
   disable() { this.enabled = false; }
 }

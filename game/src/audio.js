@@ -1,13 +1,17 @@
-// SKYWARD — fully procedural WebAudio. Climbing the stairs *performs* music:
-// each step advances a looping pentatonic melody, turns become accented beats,
-// and the arrangement (bass, hats, shimmer) builds with the combo. No files.
+// SKYWARD — fully procedural WebAudio, now a RHYTHM GAME. A continuous fixed-tempo
+// SONG plays on its own clock (a lookahead scheduler running the backing track), and
+// the player's taps become melodic ACCENTS layered on top. The staircase is laid out
+// on the same beat grid (see config.RHYTHM / rhythmFlip), so this module also exposes
+// the beat clock the rest of the game syncs to. No files — all synthesized.
+import { RHYTHM, rhythmFlip } from './config.js';
 
-// C-major pentatonic phrase (semitone offsets from a root), a 24-note motif with
-// a rising/falling contour that resolves back home so any tap-sequence loops nicely.
-// Notes: C D E G A  across ~2 octaves. No 4th/7th => nothing ever clashes.
+// C-major pentatonic phrase (semitone offsets from a root), a 24-note motif with a
+// rising/falling contour. Notes: C D E G A across ~2 octaves. No 4th/7th => never clashes.
 const PENTA = [0, 2, 4, 7, 9, 12, 14, 12, 9, 7, 9, 12,
                16, 14, 12, 9, 7, 4, 2, 4, 7, 9, 4, 0];
-// Slow chord progression (root semitone offsets): I - vi - IV - V, advances by step.
+// A gentle pentatonic arp line for the song's lead (one note per 8th note).
+const LEAD = [12, 16, 19, 16, 14, 12, 9, 12, 16, 14, 12, 9, 7, 9, 12, 9];
+// Slow chord progression (root semitone offsets): I - vi - IV - V. Advances per bar.
 const PROG = [0, 9, 5, 7];
 const ROOT = 130.81; // C3
 
@@ -15,8 +19,16 @@ export class Audio {
   constructor() {
     this.ctx = null; this.master = null; this.ready = false;
     this.muted = false;
-    this.melIdx = 0;   // position in the melodic phrase
-    this.harmIdx = 0;  // position in the chord progression
+    this.melIdx = 0;    // position in the player's tap-accent phrase
+
+    // --- Transport / beat clock ---
+    this.running = false;       // is the song playing?
+    this.transportStart = 0;    // ctx time the transport was stamped at
+    this.stepCounter = 0;       // running 16th-note index since start
+    this.nextStepTime = 0;      // ctx time of the next 16th to schedule
+    this._sched = null;         // setInterval handle for the lookahead loop
+    this.beatDur = 60 / RHYTHM.bpm;
+    this.stepDur = this.beatDur / 4; // one 16th note
   }
 
   init() {
@@ -37,15 +49,22 @@ export class Audio {
     this.master.connect(this.ctx.destination);
 
     // Shared reverb/space send: feedback delay -> lowpass -> into the bus.
-    this.spaceSend = this.ctx.createGain(); this.spaceSend.gain.value = 0.0;
+    this.spaceSend = this.ctx.createGain(); this.spaceSend.gain.value = 0.18;
     const delay = this.ctx.createDelay(1.0); delay.delayTime.value = 0.26;
     const fb = this.ctx.createGain(); fb.gain.value = 0.42;
     const damp = this.ctx.createBiquadFilter(); damp.type = 'lowpass'; damp.frequency.value = 2600;
     this.spaceSend.connect(delay); delay.connect(damp); damp.connect(fb);
     fb.connect(delay); damp.connect(this.bus);
 
-    this.ready = true;
+    // Song bus: the whole backing track fades in/out here (silent until setPad(true)).
+    this.songGain = this.ctx.createGain(); this.songGain.gain.value = 0.0001;
+    this.songGain.connect(this.bus);
+    this._songLevel = 0.0;
+
+    // Warm, slow, breathing pad bed — a layer of the song, lives under songGain.
     this._startPad();
+
+    this.ready = true;
   }
 
   resume() { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); }
@@ -72,7 +91,137 @@ export class Audio {
     return o;
   }
 
-  // Duck the pad a touch on each note so the melody sits on top, then recover.
+  // ======================= TRANSPORT + BEAT CLOCK =========================
+
+  // Start the song's own clock (independent of taps). Aligned to a small lookahead.
+  _startTransport() {
+    if (this.running || !this.ready) return;
+    const t0 = this.ctx.currentTime + 0.1; // small lookahead so the first hit isn't late
+    this.transportStart = t0;
+    this.stepCounter = 0;
+    this.nextStepTime = t0;
+    this.running = true;
+    this._sched = setInterval(() => this._scheduler(), 25); // ~25ms lookahead loop
+  }
+
+  _stopTransport() {
+    this.running = false;
+    if (this._sched) { clearInterval(this._sched); this._sched = null; }
+  }
+
+  // Lookahead scheduler: queue every 16th-note event up to ~120ms ahead of the clock.
+  _scheduler() {
+    if (!this.running) return;
+    const horizon = this.ctx.currentTime + 0.12;
+    while (this.nextStepTime < horizon) {
+      this._scheduleStep(this.stepCounter, this.nextStepTime);
+      this.stepCounter++;
+      this.nextStepTime += this.stepDur;
+    }
+  }
+
+  // The arrangement, evaluated per 16th note. Section (motif) advances every
+  // RHYTHM.sectionSteps steps; accents land on that section pattern's `1` positions.
+  _scheduleStep(step, t) {
+    const secLen = RHYTHM.sectionSteps;
+    const bar = Math.floor(step / secLen);
+    const sec = bar % RHYTHM.patterns.length;      // which motif is playing now
+    const pos = step % secLen;                     // 0..15 within the bar
+    const accent = RHYTHM.patterns[sec][pos] === 1; // "turn" grid position
+    const song = this.songGain;
+
+    // Chord for this bar (progression walks I - vi - IV - V, one chord per bar).
+    const chordSemi = PROG[bar % PROG.length];
+    const chordF = ROOT * Math.pow(2, chordSemi / 12);
+
+    // --- Drums: four-on-the-floor kick, backbeat snare, running hats ---
+    if (pos % 4 === 0) this._kick(t, 0.17, song);        // beats 1..4
+    if (pos === 4 || pos === 12) this._snare(t, 0.12, song); // backbeat
+    if (pos % 2 === 0) this._hat(t, accent ? 0.07 : 0.045, accent, song); // 8th-note hats, open on accents
+
+    // --- Bass: low root on the downbeats, a pentatonic passing note before the bar turns ---
+    if (pos === 0 || pos === 8) this._voice('sine', chordF * 0.5, t, 0.5, 0.22, song, 0, 0.04);
+    if (pos === 14) {
+      const nextSemi = PROG[(bar + 1) % PROG.length];
+      this._voice('sine', ROOT * Math.pow(2, nextSemi / 12) * 0.5, t, 0.22, 0.16, song, 0, 0.03);
+    }
+
+    // --- Chord-pad stabs (root + fifth + octave => neutral, never a wrong 3rd) on beats 1 & 3 ---
+    if (pos === 0 || pos === 8) {
+      this._voice('triangle', chordF, t, 0.32, 0.10, song, -6, 0.12);
+      this._voice('sine', chordF * 1.5, t, 0.30, 0.06, song, 0, 0.12);
+      this._voice('sine', chordF * 2, t, 0.26, 0.05, song, 0, 0.12);
+    }
+
+    // --- Gentle lead arp: one pentatonic note per 8th, brighter/longer on accents (the "fills") ---
+    if (pos % 2 === 0) {
+      const semi = LEAD[(step / 2) % LEAD.length | 0] ?? 12;
+      const f = ROOT * Math.pow(2, semi / 12);
+      if (accent) {
+        this._voice('triangle', f, t, 0.42, 0.14, song, -4, 0.4);
+        this._voice('sine', f * 2, t, 0.30, 0.06, song, 0, 0.32); // shimmer octave on the turn
+      } else {
+        this._voice('triangle', f, t, 0.20, 0.07, song, -3, 0.14);
+      }
+    }
+  }
+
+  // beatPhase — fractional position within the current beat, in [0,1). 0 = on a beat.
+  beatPhase() {
+    if (!this.running) return 0;
+    const e = this.ctx.currentTime - this.transportStart;
+    if (e <= 0) return 0;
+    return ((e % this.beatDur) + this.beatDur) % this.beatDur / this.beatDur;
+  }
+
+  // nearestBeatError — signed seconds from now to the nearest beat (0 = dead on).
+  nearestBeatError() {
+    if (!this.running) return 999;
+    const e = this.ctx.currentTime - this.transportStart;
+    const beats = e / this.beatDur;
+    return (beats - Math.round(beats)) * this.beatDur;
+  }
+
+  // beatCount — whole beats elapsed since the transport started.
+  beatCount() {
+    if (!this.running) return 0;
+    const e = this.ctx.currentTime - this.transportStart;
+    return e <= 0 ? 0 : Math.floor(e / this.beatDur);
+  }
+
+  // ======================= PLAYER TAP ACCENT ==============================
+
+  // step() is the per-tap ACCENT — a melodic pluck layered over the self-playing song.
+  // It does NOT advance the song (the transport owns tempo). info.grade shapes it.
+  step(combo, info = {}) {
+    if (!this.ready || this.muted) return;
+    const t = this.ctx.currentTime;
+    const turned = !!info.turned;
+    const grade = info.grade || 'good';
+
+    // Accent note from the looping pentatonic phrase, an octave over the bass.
+    const semi = PENTA[this.melIdx % PENTA.length];
+    this.melIdx++;
+    const freq = ROOT * Math.pow(2, (semi + 12) / 12);
+
+    // Grade shapes brightness / length / reverb: perfect = rich & long, off = dull & short.
+    let g, dur, sp, rich;
+    if (grade === 'perfect') { g = 0.26; dur = 0.52; sp = 0.42; rich = 2; }
+    else if (grade === 'off') { g = 0.14; dur = 0.16; sp = 0.05; rich = 0; }
+    else { g = 0.20; dur = 0.28; sp = 0.18; rich = 1; } // 'good'
+    if (turned) { g *= 1.15; dur *= 1.18; sp = Math.min(0.5, sp + 0.1); } // turns a touch bigger
+
+    this._voice('triangle', freq, t, dur, g, this.bus, turned ? -6 : -4, sp);
+    if (rich >= 2) {
+      this._voice('sine', freq * 1.5, t, dur * 0.8, g * 0.5, this.bus, 0, sp);   // fifth
+      this._voice('sine', freq * 2, t, dur * 0.6, g * 0.4, this.bus, 0, sp);     // octave
+    } else if (rich >= 1) {
+      this._voice('sine', freq * 2, t, dur * 0.7, g * 0.35, this.bus, 0, sp * 0.5);
+    }
+    this._duckPad(t);
+  }
+
+  // Duck the pad bed a touch on each tap so the accent sits on top, then recover.
   _duckPad(t) {
     if (!this.padGain) return;
     const base = this._padLevel;
@@ -82,74 +231,47 @@ export class Audio {
     this.padGain.gain.linearRampToValueAtTime(base, t + 0.5);
   }
 
-  // Main musical driver — one note per step, accented on turns, layered by combo.
-  step(combo, info = {}) {
-    if (!this.ready || this.muted) return;
-    const t = this.ctx.currentTime;
-    const turned = !!info.turned;
-    const score = info.score || 0;
-
-    // Melody note from the looping phrase.
-    const semi = PENTA[this.melIdx % PENTA.length];
-    this.melIdx++;
-    // Current chord root (progression advances slowly with score).
-    this.harmIdx = Math.floor(score / 4) % PROG.length;
-    const chordRoot = PROG[this.harmIdx];
-    const freq = ROOT * Math.pow(2, (semi + 12) / 12); // melody an octave up over the bass
-
-    // Turn = emphasized beat: longer, louder, richer (add a fifth + octave), more space.
-    // Straight step = short, light pluck.
-    if (turned) {
-      const g = 0.30, dur = 0.55, sp = 0.35;
-      this._voice('triangle', freq, t, dur, g, this.bus, -6, sp);
-      this._voice('triangle', freq, t, dur, g * 0.9, this.bus, +7, sp);
-      this._voice('sine', freq * 1.5, t, dur * 0.8, g * 0.5, this.bus, 0, sp); // fifth
-      this._voice('sine', freq * 2, t, dur * 0.6, g * 0.35, this.bus, 0, sp);  // octave
-    } else {
-      const g = 0.20, dur = 0.26, sp = combo > 8 ? 0.18 : 0.08;
-      this._voice('triangle', freq, t, dur, g, this.bus, -4, sp);
-      this._voice('sine', freq * 2, t, dur * 0.7, g * 0.4, this.bus, 0, sp * 0.5);
-    }
-    this._duckPad(t);
-
-    // --- Progressive arrangement, gated on combo ---
-    // Soft bass note every 4 steps: the current chord's root, low and mellow.
-    if (score % 4 === 0) {
-      this._voice('sine', ROOT * Math.pow(2, chordRoot / 12) * 0.5, t, 0.7,
-                  0.22, this.bus, 0, 0.05);
-    }
-    // Gentle percussion pulse once combo climbs: a filtered-noise hat.
-    if (combo >= 6) this._hat(t, combo >= 16 ? 0.10 : 0.06);
-    // Soft kick on the beat at higher combos to anchor the groove.
-    if (combo >= 12 && score % 2 === 0) this._kick(t, 0.16);
-    // More reverb space as the combo grows.
-    if (combo >= 20) this.spaceSend.gain.setTargetAtTime(0.28, t, 0.5);
-  }
-
-  // Filtered white-noise hat, very short — sits under the melody.
-  _hat(t, gain) {
+  // Filtered white-noise hat — closed (short) or open (longer, on accents).
+  _hat(t, gain, open = false, dest) {
     const src = this.ctx.createBufferSource();
-    const buf = this.ctx.createBuffer(1, 0.05 * this.ctx.sampleRate, this.ctx.sampleRate);
+    const len = (open ? 0.18 : 0.05) * this.ctx.sampleRate | 0;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     src.buffer = buf;
-    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7000;
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = open ? 6000 : 7500;
     const g = this.ctx.createGain();
-    g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
-    src.connect(hp); hp.connect(g); g.connect(this.bus);
-    src.start(t); src.stop(t + 0.06);
+    g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + (open ? 0.18 : 0.05));
+    src.connect(hp); hp.connect(g); g.connect(dest || this.bus);
+    src.start(t); src.stop(t + (open ? 0.2 : 0.06));
   }
 
   // Soft sine kick.
-  _kick(t, gain) {
+  _kick(t, gain, dest) {
     const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
     o.type = 'sine'; o.frequency.setValueAtTime(120, t);
     o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
     g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
-    o.connect(g); g.connect(this.bus); o.start(t); o.stop(t + 0.18);
+    o.connect(g); g.connect(dest || this.bus); o.start(t); o.stop(t + 0.18);
   }
 
-  // Subtle footstep tick on landing — kept quiet so it doesn't fight the melody.
+  // Light snare: noise burst + a short body tone.
+  _snare(t, gain, dest) {
+    const src = this.ctx.createBufferSource();
+    const buf = this.ctx.createBuffer(1, 0.12 * this.ctx.sampleRate, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    src.buffer = buf;
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.7;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    src.connect(bp); bp.connect(g); g.connect(dest || this.bus);
+    src.start(t); src.stop(t + 0.13);
+    // body
+    this._voice('triangle', 180, t, 0.09, gain * 0.5, dest || this.bus, 0, 0);
+  }
+
+  // Subtle footstep tick on landing — kept quiet so it doesn't fight the music.
   land() {
     if (!this.ready || this.muted) return;
     const t = this.ctx.currentTime;
@@ -160,8 +282,7 @@ export class Audio {
     o.connect(g); g.connect(this.bus); o.start(t); o.stop(t + 0.14);
   }
 
-  // Kept for backward-compat; real turn emphasis now flows through step(info.turned).
-  // Tiny bright accent, harmless if called directly.
+  // Backward-compat: turn emphasis normally flows through step(info.turned). Tiny bright accent.
   turn() {
     if (!this.ready || this.muted) return;
     const t = this.ctx.currentTime;
@@ -180,7 +301,7 @@ export class Audio {
     this.spaceSend.gain.setTargetAtTime(0.3, t, 0.2);
   }
 
-  // "You fell" — descending sweep; duck & stop the music bed.
+  // "You fell" — descending sweep; stop the song and duck the bed to near-silence.
   fail() {
     if (!this.ready || this.muted) return;
     const t = this.ctx.currentTime;
@@ -191,23 +312,24 @@ export class Audio {
     f.frequency.exponentialRampToValueAtTime(200, t + 0.6);
     g.gain.setValueAtTime(0.24, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
     o.connect(f); f.connect(g); g.connect(this.bus); o.start(t); o.stop(t + 0.7);
-    // Reset the performance and duck the bed.
-    this.melIdx = 0; this.harmIdx = 0;
-    if (this.padGain) {
-      this.padGain.gain.cancelScheduledValues(t);
-      this.padGain.gain.setValueAtTime(this.padGain.gain.value, t);
-      this.padGain.gain.linearRampToValueAtTime(0.03, t + 0.5);
-      this._padLevel = 0.03;
+    // Stop the transport and duck the whole song bed away.
+    this._stopTransport();
+    this.melIdx = 0;
+    this._songLevel = 0.0;
+    if (this.songGain) {
+      this.songGain.gain.cancelScheduledValues(t);
+      this.songGain.gain.setValueAtTime(this.songGain.gain.value, t);
+      this.songGain.gain.linearRampToValueAtTime(0.0001, t + 0.5);
     }
-    this.spaceSend.gain.setTargetAtTime(0.0, t, 0.3);
+    this.spaceSend.gain.setTargetAtTime(0.12, t, 0.3);
   }
 
-  // Warm, slow, breathing pad bed under everything.
+  // Warm, slow, breathing pad bed — a continuous layer inside the song bus.
   _startPad() {
     const t = this.ctx.currentTime;
-    this._padLevel = 0.0;
-    this.padGain = this.ctx.createGain(); this.padGain.gain.value = 0.0;
-    this.padGain.connect(this.bus);
+    this._padLevel = 0.6; // level *within* songGain
+    this.padGain = this.ctx.createGain(); this.padGain.gain.value = this._padLevel;
+    this.padGain.connect(this.songGain);
     const filt = this.ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 700;
     filt.connect(this.padGain);
     // Slow filter LFO => the pad "breathes".
@@ -223,15 +345,30 @@ export class Audio {
     });
   }
 
-  // Fade the ambient bed in (true) / down (false).
+  // setPad(true) STARTS the song (transport + fade in); setPad(false) STOPS/ducks it.
   setPad(on) {
     if (!this.ready) return;
     const t = this.ctx.currentTime;
-    this._padLevel = on ? 0.5 : 0.12;
-    this.padGain.gain.cancelScheduledValues(t);
-    this.padGain.gain.setValueAtTime(this.padGain.gain.value, t);
-    this.padGain.gain.linearRampToValueAtTime(this._padLevel, t + 1.2);
+    if (on) {
+      this._startTransport();
+      this._songLevel = 0.9;
+      this.songGain.gain.cancelScheduledValues(t);
+      this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), t);
+      this.songGain.gain.exponentialRampToValueAtTime(this._songLevel, t + 1.2);
+      this.spaceSend.gain.setTargetAtTime(0.22, t, 0.6);
+    } else {
+      this._stopTransport();
+      this._songLevel = 0.0001;
+      this.songGain.gain.cancelScheduledValues(t);
+      this.songGain.gain.setValueAtTime(Math.max(0.0001, this.songGain.gain.value), t);
+      this.songGain.gain.exponentialRampToValueAtTime(0.0001, t + 1.0);
+    }
   }
+
+  // rhythmFlip(i) marks a stair index as a "turn"; the song emphasizes those same
+  // grid positions via RHYTHM.patterns in _scheduleStep. Exposed for callers that
+  // want the audio module's view of whether a given step is an accent.
+  isTurnStep(i) { return !!rhythmFlip(i); }
 
   toggleMute() {
     this.muted = !this.muted;
