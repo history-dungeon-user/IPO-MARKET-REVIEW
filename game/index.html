@@ -131,10 +131,12 @@
   @keyframes shimmer { 0%,100%{filter:brightness(1)} 50%{filter:brightness(1.5)} }
 
   /* music controls on the start screen */
-  .musicbar { margin-top: 20px; display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; pointer-events:auto; }
-  .mbtn { pointer-events:auto; cursor:pointer; font-family:var(--ui-font); font-size:14px; font-weight:800;
-    letter-spacing:.02em; color:var(--cream); padding:11px 20px; border-radius:99px; border:none;
-    background: rgba(255,255,255,.10); box-shadow: inset 0 0 0 1.5px rgba(255,244,224,.34);
+  .musicbar { margin-top: 18px; display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; pointer-events:auto; }
+  /* solid, high-contrast pill so it's clearly a button over the character behind it */
+  .mbtn { pointer-events:auto; cursor:pointer; font-family:var(--ui-font); font-size:15px; font-weight:800;
+    letter-spacing:.02em; color:#fff4e0; padding:13px 24px; border-radius:99px; border:none;
+    background: rgba(42,22,54,.82); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    box-shadow: 0 8px 22px rgba(30,12,40,.5), inset 0 0 0 1.6px rgba(255,244,224,.6);
     transition: transform .12s cubic-bezier(.2,1.6,.3,1), background .15s; }
   .mbtn:active { transform: translateY(2px) scale(.97); }
   label.mbtn { display:inline-block; }
@@ -142,9 +144,9 @@
     clip:rect(0 0 0 0); white-space:nowrap; border:0; padding:0; margin:-1px; }
   .mbtn.ghosttap { background: linear-gradient(180deg, rgba(123,255,207,.22), rgba(123,255,207,.10));
     box-shadow: inset 0 0 0 1.5px rgba(123,255,207,.5); color:#eafff7; }
-  .mnote { margin-top:10px; font-size:12px; font-weight:600; letter-spacing:.02em;
-    color: rgba(255,244,224,.6); text-align:center; max-width:320px; line-height:1.5;
-    text-shadow:0 1px 6px rgba(60,25,50,.4); }
+  .mnote { margin-top:12px; font-size:12.5px; font-weight:700; letter-spacing:.02em;
+    color: rgba(255,248,235,.92); text-align:center; max-width:330px; line-height:1.5;
+    text-shadow:0 1px 3px rgba(30,12,40,.9), 0 2px 12px rgba(30,12,40,.7); }
   .menu-hint { position: fixed; left:0; right:0; bottom: max(26px, env(safe-area-inset-bottom));
     text-align:center; font-size:12px; font-weight:600; letter-spacing:.1em;
     color: rgba(255,244,224,.55); pointer-events:none;

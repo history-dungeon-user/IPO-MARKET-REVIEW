@@ -45,7 +45,7 @@ export const CFG = {
     follow: 0.11,          // lerp factor
     shake: 0.0,
     // menu hero framing: a close cute back/3-quarter of the climber, stairs behind
-    menu: { radiusXZ: 12.5, offsetY: 8.2, lookFwd: 1.6, lookUp: 1.05 },
+    menu: { radiusXZ: 12.5, offsetY: 8.2, lookFwd: 1.6, lookUp: 1.5 },
   },
 };
 
