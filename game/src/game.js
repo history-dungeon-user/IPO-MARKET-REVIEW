@@ -12,6 +12,7 @@ import { PostFX } from './postfx.js';
 import { Input } from './input.js';
 import { Audio } from './audio.js';
 import { UI } from './ui.js';
+import { SONG_DATA, SONG_NAME } from './song-data.js';
 
 const BEST_KEY = 'skyward.best.v1';
 
@@ -77,6 +78,7 @@ export class Game {
     document.getElementById('playBtn').addEventListener('click', () => this.startGame());
     document.getElementById('retryBtn').addEventListener('click', () => this.startGame());
     this._setupMusicUI();
+    this._loadBuiltinSong();
 
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -98,6 +100,28 @@ export class Game {
     this.camera.fov = h > w ? CFG.camera.fov * 1.16 : CFG.camera.fov;
     this.camera.updateProjectionMatrix();
     if (this.postfx) this.postfx.setSize(w, h, this.dpr);
+  }
+
+  // Decode & set the embedded user-authored song as the default track (plays on
+  // start once there's a gesture). Auto-detects tempo so the stairs sync to it.
+  async _loadBuiltinSong() {
+    try {
+      this.audio.init();                       // suspended ctx — decoding is allowed pre-gesture
+      // decode the data URI by hand (fetch of data: can be blocked by strict CSP)
+      const bin = atob(SONG_DATA.slice(SONG_DATA.indexOf(',') + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const bpm = await (this.audio.loadUserSong ? this.audio.loadUserSong(bytes.buffer) : false);
+      if (this.audio.userMode) {
+        const note = document.getElementById('songNote');
+        const tapBtn = document.getElementById('tapTempoBtn');
+        const bpmVal = document.getElementById('bpmVal');
+        const b = Math.round(this.audio.bpm || (typeof bpm === 'number' ? bpm : 96));
+        if (note) note.textContent = '♪ ' + SONG_NAME + ' (내 곡) · 박자가 안 맞으면 TAP으로 조정';
+        if (tapBtn) tapBtn.hidden = false;
+        if (bpmVal) bpmVal.textContent = b;
+      }
+    } catch (e) { /* fall back to the procedural song */ }
   }
 
   // Load-your-own-song + tap-tempo controls on the start screen.

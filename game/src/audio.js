@@ -118,20 +118,100 @@ export class Audio {
 
   // ======================= USER SONG (player's own track) =================
 
-  // Decode raw audio bytes into a loopable buffer and switch to user-song mode.
-  // Returns true on success, false if decoding fails.
+  // Decode raw audio bytes into a loopable buffer, auto-detect its tempo so the stairs
+  // sync without the player tapping, and switch to user-song mode.
+  // Returns the detected BPM (number) on success, false if decoding fails.
   async loadUserSong(arrayBuffer) {
     if (!this.ctx || !arrayBuffer) return false;
     try {
       const buf = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
       this.userBuffer = buf;
       this.userMode = true;
+      // Estimate tempo from the audio and lock the beat grid to it.
+      const detected = this._detectBpm(buf);
+      this.setTempo(detected); // clamps + realigns the clock; also stores this.bpm
       // If the transport is already playing, swap the bed to the user song right now.
       if (this.running) this._startUserSource();
-      return true;
+      return detected;
     } catch (e) {
       return false;
     }
+  }
+
+  // Compact, dependency-free BPM estimator over a decoded AudioBuffer.
+  // Energy-envelope onset detection + autocorrelation; folds into a musical range.
+  // Falls back to RHYTHM.bpm on short/quiet/degenerate input.
+  _detectBpm(buf) {
+    const FALLBACK = RHYTHM.bpm;
+    if (!buf || !buf.length || !buf.sampleRate) return FALLBACK;
+    const sr = buf.sampleRate;
+    const ch0 = buf.getChannelData(0);
+    const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+
+    // Analyze at most the first ~60s for speed.
+    const N = Math.min(ch0.length, Math.floor(sr * 60));
+    const hop = Math.max(1, Math.floor(sr * 0.0116)); // ~11.6ms frames
+    const frames = Math.floor(N / hop);
+    if (frames < 16) return FALLBACK; // too short to judge
+
+    // 1) Per-frame RMS energy (mix ch1 in if stereo).
+    const energy = new Float32Array(frames);
+    for (let f = 0; f < frames; f++) {
+      let sum = 0; const base = f * hop;
+      for (let i = 0; i < hop; i++) {
+        let s = ch0[base + i];
+        if (ch1) s = (s + ch1[base + i]) * 0.5;
+        sum += s * s;
+      }
+      energy[f] = Math.sqrt(sum / hop);
+    }
+
+    // 2) Onset envelope = positive first-difference, then mean-remove.
+    const onset = new Float32Array(frames);
+    let mean = 0;
+    for (let f = 1; f < frames; f++) {
+      const d = energy[f] - energy[f - 1];
+      onset[f] = d > 0 ? d : 0;
+      mean += onset[f];
+    }
+    mean /= frames;
+    let energyAcc = 0;
+    for (let f = 0; f < frames; f++) { onset[f] -= mean; energyAcc += onset[f] * onset[f]; }
+    if (energyAcc <= 1e-9) return FALLBACK; // signal too quiet / flat
+
+    // 3) Autocorrelate over lags for 60–190 BPM; pick the strongest lag.
+    const frameDur = hop / sr; // seconds per frame
+    const lagFor = (bpm) => Math.round(60 / (bpm * frameDur));
+    const minLag = lagFor(190); // fast tempo => small lag
+    const maxLag = lagFor(60);  // slow tempo => large lag
+    if (maxLag >= frames || minLag < 1) return FALLBACK;
+
+    const corr = (lag) => {
+      let c = 0;
+      for (let f = lag; f < frames; f++) c += onset[f] * onset[f - lag];
+      return c;
+    };
+
+    let bestLag = -1, bestC = -Infinity;
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      const c = corr(lag);
+      if (c > bestC) { bestC = c; bestLag = lag; }
+    }
+    if (bestLag < 1 || bestC <= 0) return FALLBACK;
+
+    let bpm = 60 / (bestLag * frameDur);
+
+    // 4) Fold into a sensible tap range using the octave with the stronger support.
+    if (bpm < 90) {
+      const dbl = bpm * 2;
+      if (dbl <= 190) { const cd = corr(Math.round(lagFor(dbl))); if (cd >= bestC * 0.6) bpm = dbl; }
+    } else if (bpm > 180) {
+      bpm = bpm / 2;
+    }
+
+    bpm = Math.round(bpm);
+    if (!isFinite(bpm) || bpm < 60 || bpm > 190) return FALLBACK;
+    return bpm;
   }
 
   // Drop the user's song; the next transport start uses the procedural arrangement again.
