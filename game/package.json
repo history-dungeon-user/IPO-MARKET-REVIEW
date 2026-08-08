@@ -12,5 +12,8 @@
   "dependencies": {
     "playwright": "^1.49.0",
     "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

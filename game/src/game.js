@@ -15,6 +15,12 @@ import { UI } from './ui.js';
 
 const BEST_KEY = 'skyward.best.v1';
 
+// localStorage can throw in sandboxed iframes (e.g. published artifacts); guard it.
+const safeStore = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
 export class Game {
   constructor(mount) {
     this.mount = mount;
@@ -47,7 +53,7 @@ export class Game {
     this.ui = new UI();
     this.audio = new Audio();
 
-    this.best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0;
+    this.best = parseInt(safeStore.get(BEST_KEY) || '0', 10) || 0;
     this.ui.setBest(this.best);
 
     this.playerIndex = 0;
@@ -244,7 +250,7 @@ export class Game {
   finishDeath() {
     this.state = 'over';
     const isNew = this.score > this.best;
-    if (isNew) { this.best = this.score; localStorage.setItem(BEST_KEY, String(this.best)); this.ui.setBest(this.best); }
+    if (isNew) { this.best = this.score; safeStore.set(BEST_KEY, String(this.best)); this.ui.setBest(this.best); }
     this.ui.showOver(this.score, this.best, isNew);
   }
 
