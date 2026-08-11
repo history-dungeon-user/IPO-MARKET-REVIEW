@@ -230,6 +230,19 @@ def _corp_key(s):
     return re.sub(r"[\s㈜\(\)]|주식회사", "", s or "")
 
 
+def _spac_key(s):
+    """스팩 이름 정규화 키. KIND는 '엔에이치스팩34호', DART는 '엔에이치기업인수목적34호'처럼
+       같은 스팩을 다르게 부른다. '기업인수목적'↔'스팩', '제/호' 차이를 흡수해 매칭한다.
+       예) 엔에이치스팩34호 = 엔에이치기업인수목적34호 → 'nh34',
+           케이비제34호스팩 = 케이비기업인수목적34호 → 'kb34'."""
+    s = re.sub(r"[\s㈜\(\)]|주식회사", "", (s or "").lower())
+    s = s.replace("기업인수목적", "").replace("스팩", "").replace("스펙", "").replace("회사", "")
+    s = s.replace("엔에이치", "nh").replace("케이비", "kb").replace("아이비케이", "ibk") \
+         .replace("한국투자", "한국").replace("미래에셋", "미래")
+    s = re.sub(r"제|호", "", s)
+    return s
+
+
 def resolve_corp_codes(names, corp_map):
     """corp_map에 없는 회사명을 DART corpCode.xml로 자동 해결 → corp_map.json에 영구 저장.
        (이게 없으면 신규 승인법인이 'corp_code 미확보'로 남아 신고서를 아예 못 읽는다.)"""
@@ -239,7 +252,7 @@ def resolve_corp_codes(names, corp_map):
     idx = dart_corp_code_index()
     if not idx:
         return corp_map
-    flat = None
+    flat = None; spac_idx = None
     found = {}
     for n in missing:
         cands = idx.get(n)
@@ -249,6 +262,14 @@ def resolve_corp_codes(names, corp_map):
                 for cn, cl in idx.items():
                     flat.setdefault(_corp_key(cn), []).extend(cl)
             cands = flat.get(_corp_key(n))
+        if not cands and re.search(r"스팩|스펙|기업인수목적", n):
+            # 스팩 이름 표기차(스팩↔기업인수목적) 흡수
+            if spac_idx is None:
+                spac_idx = {}
+                for cn, cl in idx.items():
+                    if re.search(r"스팩|스펙|기업인수목적", cn):
+                        spac_idx.setdefault(_spac_key(cn), []).extend(cl)
+            cands = spac_idx.get(_spac_key(n))
         if not cands:
             continue
         # 상장코드 보유 건 우선 → 최근 수정일 우선
@@ -421,20 +442,23 @@ def extract_registration(text):
 
     # 공모개요 표 (반드시 헤더행 앵커로만 인식한다)
     #   증권의 종류 | 증권수량 | 액면가액 | 모집(매출)가액 | 모집(매출)총액 | 모집(매출)방법
-    #   보통주      | 2,000,000 | 100   | 20,000        | 40,000,000,000 | 일반공모
-    # ※ 앵커 없이 '보통주|숫자|…' 만 찾으면 문서 뒷부분의 무관한 표(자본금·주식총수 등)를
+    #   보통주      | 2,000,000 | 100      | 20,000  | 40,000,000,000 | 일반공모
+    #   증권예탁증권 | 5,000,000 | USD 0.0001 | 12,000 | 60,000,000,000 | 일반공모  ← 해외 KDR(인제니아)
+    # ※ 앵커 없이 '보통주|숫자…' 만 찾으면 문서 뒷부분의 무관한 표(자본금·주식총수 등)를
     #    잡아 액면가/자본금이 들어가는 사고가 난다(빅웨이브로보틱스 사례).
-    # ※ 정정신고서엔 [정정 전]·[정정 후]·[본문] 순으로 최대 3번 나오므로 '마지막'이 현행값.
+    # ※ 증권종류=한글 2~12자(보통주·기명식보통주·증권예탁증권), 액면가액 칸은 숫자가 아닐 수 있어
+    #    (예: 'USD 0.0001') [^|]+ 로 건너뛴다.
+    # ※ 정정신고서엔 [정정 전]·[정정 후]·[본문] 순으로 여러 번 나오므로 '마지막'이 현행값.
     _ov = list(re.finditer(
-        r"증권의\s*종류\s*\|\s*증권\s*수량[\s\S]{0,80}?보통주\s*\|\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|"
-        r"\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|", text))
+        r"증권의\s*종류\s*\|\s*증권\s*수량[^\n]*\n\s*([가-힣]{2,12})\s*\|\s*([\d,]+)\s*\|\s*"
+        r"[^|]+\|\s*([\d,]+)\s*\|\s*([\d,]+)\s*\|", text))
 
     def _int(s):
         try: return int(str(s).replace(",", ""))
         except Exception: return 0
 
     for m in reversed(_ov):                      # 뒤(=현행)에서부터, 검증 통과하는 첫 표를 채택
-        qty, _par, prc, amt = m.groups()          # 증권수량 · 액면가액 · 모집가액 · 모집총액
+        _kind, qty, prc, amt = m.groups()         # 증권종류 · 증권수량 · 모집가액 · 모집총액
         q, p, a = _int(qty), _int(prc), _int(amt)
         # 내부 정합성: 공모개요는 '증권수량 × 모집가액 = 모집총액'이 항상 성립한다.
         # 통과 못 하면 다른 표를 오인한 것이므로 채택하지 않는다(틀린 값보다 공란).
@@ -865,8 +889,14 @@ def track_offerings(approved_names):
                 biz = extract_business(text)
                 if biz: rec["사업개요"] = biz
                 # 확정공모가는 [발행조건확정] 신고서에서만 유효.
-                # 그 전(최초/정정)엔 "확정공모가액…밴드 하단 기준" 문구를 오인 추출하므로 비운다.
-                if status != "발행조건확정":
+                #  · 발행조건확정: 공모개요의 '모집가액'이 곧 확정공모가(하단 확정 포함).
+                #    문구 정규식('확정공모가액…원')은 KDR 등에서 띄어쓰기 변형으로 실패하므로
+                #    공모개요 모집가액을 확정가로 그대로 채택하는 편이 견고하다.
+                #  · 그 전(최초/정정): "확정공모가액…밴드 하단 기준" 문구 오인 추출 → 비운다.
+                if status == "발행조건확정":
+                    if rec.get("모집가액"):
+                        rec["확정공모가"] = rec["모집가액"]
+                else:
                     rec["확정공모가"] = ""
                 # 공모금액은 신고서 '정정 후' 공모개요에서 그대로 읽으므로(재계산 불필요)
                 # 확정 시 자동으로 확정총액, 그 전엔 밴드 하단 기준 총액이 들어간다.
