@@ -815,8 +815,11 @@ def _extend_ledger(company, listing, underwriters):
         ui.append({"증권사": u["증권사"], "역할": u["역할"],
                    "인수금액": u["인수금액"], "인수수수료": u["인수대가"],
                    "청약수수료": chung, "전체수수료": round(u["인수대가"] + chung, 3)})
-    dl.append({"업체": company, "상장일": listing.get("상장일", ""),
-               "시장": listing.get("시장", "코스닥"), "발행금액": total, "인수인": ui})
+    _deal = {"업체": company, "상장일": listing.get("상장일", ""),
+             "시장": listing.get("시장", "코스닥"), "발행금액": total, "인수인": ui}
+    if listing.get("납입일"):
+        _deal["납입일"] = listing["납입일"]
+    dl.append(_deal)
     # 집계 재계산
     agg = {}
     for d in dl:
@@ -836,6 +839,27 @@ def _extend_ledger(company, listing, underwriters):
     L["주관사집계"] = sorted(agg.values(), key=lambda r: -r["전체수수료"])
     json.dump(L, open(lp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print(f"  [원장] {company} 추가 → 딜 {len(dl)}건")
+
+
+def extend_ledger_from_paid(offering):
+    """납입완료(증권발행실적보고서 제출) 공모딜을 트랙레코드 원장에 자동 반영.
+       상장 전이라도 납입이 끝났으면 '납입일 기준' 트랙레코드에 잡혀야 한다(레메디·인제니아 등).
+       _extend_ledger 가 이름으로 중복을 막으므로, 나중에 상장돼 enrich가 다시 불러도 안전하다."""
+    added = 0
+    for nm, rec in (offering or {}).items():
+        if not rec.get("실적보고서"):           # 납입완료(실적보고서) 아님 → 대기
+            continue
+        uw = rec.get("인수인상세")
+        if not uw:                              # 인수인 파싱 실패분은 반영하지 않음(값 없음)
+            continue
+        try:
+            _extend_ledger(nm, {"상장일": "미상장(납입완료)", "시장": "코스닥",
+                                "납입일": rec.get("납입일", "")}, uw)
+            added += 1
+        except Exception as e:
+            print(f"  [원장] 납입완료 반영 실패 {nm}: {e}")
+    if added:
+        print(f"[원장] 납입완료 공모딜 반영 시도 {added}건")
 
 
 def track_offerings(approved_names):
@@ -2845,6 +2869,13 @@ def main():
         enrich_listed_from_dart(listings, corp_map)
     except Exception as e:
         print(f"[ENRICH] 실패(무시): {e}")
+
+    # [3-c2] 납입완료(실적보고서 제출)됐지만 아직 상장 전인 공모딜 → 트랙레코드 원장에 반영
+    #        (레메디·인제니아처럼 납입 끝난 건은 '납입 기준' 리그에 잡혀야 함)
+    try:
+        extend_ledger_from_paid(offering)
+    except Exception as e:
+        print(f"[원장] 납입완료 반영 실패(무시): {e}")
 
     # [3-d] 상장 후 주가 추이 수집 (네이버 금융 · 클라우드에서 실행)
     try:
