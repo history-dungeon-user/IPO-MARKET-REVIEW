@@ -535,13 +535,17 @@ def extract_registration(text):
     m = re.search(r"(비교회사|유사회사|적용)\s*(P/?E R?|PER|PSR|EV/EBITDA)[^\d]{0,30}([\d.]+)\s*배?", t, re.I)
     if m: out["멀티플"] = f"{m.group(3)} ({m.group(2).upper().replace(' ','')})"
 
-    m = re.search(r"수요예측\s*일시?\s*\|?\s*(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})"
-                  r"[일)월화수목금토(\s]*[~∼]\s*(?:(\d{4})[.\s년]+)?(\d{1,2})[.\s월]+(\d{1,2})", t)
+    # 수요예측·청약 일정: '정정 후' 꼬리(t)에 표가 없으면(뒤쪽 정정 섹션이 꼬리를 차지) 전체 text에서
+    # '마지막(=현행)' 매치로 보강한다. (바로팜 등 청약표가 꼬리 밖에 있어 통째로 비던 사례)
+    _sre = (r"수요예측\s*(?:일시|기간|기일)?\s*\|?\s*(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})"
+            r"[일)월화수목금토(\s]*[~∼]\s*(?:(\d{4})[.\s년]+)?(\d{1,2})[.\s월]+(\d{1,2})")
+    m = re.search(_sre, t) or (lambda L: L[-1] if L else None)(list(re.finditer(_sre, text)))
     if m:
         out["수요예측기간"] = f"{int(m.group(2)):02d}-{int(m.group(3)):02d}~{int(m.group(5)):02d}-{int(m.group(6)):02d}"
 
-    m = re.search(r"청약기[일간][\s\S]{0,160}?(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})"
-                  r"[일)월화수목금토(\s]*[~∼]\s*(?:(\d{4})[.\s년]+)?(\d{1,2})[.\s월]+(\d{1,2})", t)
+    _cre = (r"청약기[일간][\s\S]{0,160}?(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})"
+            r"[일)월화수목금토(\s]*[~∼]\s*(?:(\d{4})[.\s년]+)?(\d{1,2})[.\s월]+(\d{1,2})")
+    m = re.search(_cre, t) or (lambda L: L[-1] if L else None)(list(re.finditer(_cre, text)))
     if m: out["청약일정"] = f"{int(m.group(2)):02d}-{int(m.group(3)):02d}~{int(m.group(5)):02d}-{int(m.group(6)):02d}"
 
     # 확정본 전용 — 확정공모가(문구). 단, 실제 정본은 공모개요 표의 '모집가액'이며
