@@ -959,7 +959,24 @@ def track_offerings(approved_names):
         if new_rcept:                      # 매번 최신 신고서 재파싱(개선 파서 적용)
             try:
                 text = dart_document_text(new_rcept)
-                rec.update(extract_registration(text))
+                _reg = extract_registration(text)
+                if not _reg.get("모집가액"):
+                    # 최신 신고서가 공모개요 없는 '얇은 정정본'(발행조건확정 후 일부 섹션만 재정정)일 때,
+                    # 공모개요가 있는 직전 증권신고서로 밴드·수량·확정가·공모금액을 보강한다.
+                    # (안 그러면 이전 '밴드 하단' 값이 그대로 남는다 — 진코스텍 23,500→19,500 사례.)
+                    for _ff in sorted(filings, key=lambda x: x.get("rcept_dt", ""), reverse=True):
+                        _rn = _ff.get("report_nm", "")
+                        if "증권신고서" not in _rn or "실적" in _rn or _ff.get("rcept_no") == new_rcept:
+                            continue
+                        try:
+                            _r2 = extract_registration(dart_document_text(_ff["rcept_no"]))
+                        except Exception:
+                            continue
+                        if _r2.get("모집가액"):
+                            for _kk in ("밴드", "공모주식수", "모집가액", "공모금액", "멀티플"):
+                                if _r2.get(_kk): _reg[_kk] = _r2[_kk]
+                            break
+                rec.update(_reg)
                 rec.update(extract_demand(text))       # 수요예측경쟁률·참여기관수
                 pay = extract_payment_date(text)
                 if pay: rec["납입일"] = pay
