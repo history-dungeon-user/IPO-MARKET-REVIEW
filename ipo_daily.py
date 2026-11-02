@@ -62,6 +62,15 @@ CORP_SEED = {
  "네오사피엔스":"01876251","엠에스바이오":"01749559",
 }
 
+# 동명이인(同名) 법인 corp_code 오매칭 강제 교정 — 저장된 corp_map보다 우선 적용.
+# corp_map 자동해결이 '상장코드 없던 시점'에 엉뚱한 동명 비상장 법인을 고정한 건을 바로잡는다.
+# 예) 디티에스: 02026880(비상장·IPO신고서 없음) → 00534729(상장·stock_code 0015M0, IPO신고서 보유).
+CORP_FIX = {"디티에스": "00534729"}
+
+# 동일 법인의 표기 불일치(별칭) — 매칭 키(_norm_name)에서만 통일, 표시명은 보존.
+# 예) 엘리스그룹(예심·offering 표기) = 엘리스(KIND 신규상장·DART 표기).
+_NAME_ALIAS = {"엘리스그룹": "엘리스"}
+
 TODAY = datetime.date.today().strftime("%Y%m%d")
 
 # ── 심사 코멘트 탭 (미승인·철회 사유 공유) ─────────────────────────────
@@ -299,6 +308,31 @@ def resolve_corp_codes(names, corp_map):
     if still:
         print(f"[DART] corp_code 미해결 {len(still)}건(수동확인): {', '.join(still)}")
     return corp_map
+
+
+def _corp_with_stock(name, cur_code):
+    """같은 이름의 DART 법인 중 상장코드(stock_code) 보유 corp_code를 반환(현재와 다를 때만).
+       동명이인 오매칭 자가 교정용 — 상장된 법인이 2026 신고서를 가지면 그쪽으로 바로잡는다.
+       없으면 None."""
+    try:
+        idx = dart_corp_code_index()
+    except Exception:
+        return None
+    if not idx:
+        return None
+    cands = idx.get(name) or []
+    if not cands:
+        flat = {}
+        for cn, cl in idx.items():
+            flat.setdefault(_corp_key(cn), []).extend(cl)
+        cands = flat.get(_corp_key(name)) or []
+    # 현재 corp가 이미 상장코드를 가지면(정상 매칭) 교정하지 않는다 — 오매칭은 '비상장을 고른' 경우뿐.
+    if any(cc == cur_code and sc for cc, sc, _md in cands):
+        return None
+    for cc, sc, _md in cands:
+        if sc and cc != cur_code:
+            return cc
+    return None
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -890,6 +924,7 @@ def track_offerings(approved_names):
     if os.path.exists(cm_path):
         try: corp_map.update(json.load(open(cm_path, encoding="utf-8")).get("corp_map", {}))
         except Exception: pass
+    corp_map.update(CORP_FIX)              # 동명이인 오매칭 강제 교정(저장값보다 우선)
     # 시드에 없는 신규 승인법인 → DART 전체목록에서 corp_code 자동 해결
     try:
         corp_map = resolve_corp_codes(approved_names, corp_map)
@@ -908,6 +943,18 @@ def track_offerings(approved_names):
         except Exception as e:
             print(f"  [경고] {name} DART 조회 실패: {e}"); continue
         reg, perf, status = latest_filing(filings)
+        if status == "미제출":
+            # 동명이인 자가 교정: 상장코드 보유 동명 법인이 2026 신고서를 가지면 그쪽으로 교정.
+            # (상장 전엔 구분이 안 돼 비상장 동명을 고정한 건을, 상장 후 자동으로 바로잡는다.)
+            _alt = _corp_with_stock(name, code)
+            if _alt:
+                try:
+                    _f2 = dart_list(_alt); _r2, _p2, _s2 = latest_filing(_f2)
+                    if _r2:
+                        code = _alt; corp_map[name] = _alt
+                        filings, reg, perf, status = _f2, _r2, _p2, _s2
+                        print(f"  [corp_code 재선택] {name} → {_alt} (상장 동명이인 교정)")
+                except Exception: pass
         new_rcept = reg["rcept_no"] if reg else None
         if new_rcept:                      # 매번 최신 신고서 재파싱(개선 파서 적용)
             try:
@@ -1173,7 +1220,7 @@ def _norm_name(s):
     if "스팩" in s or "스펙" in s:      # 스팩류만 강한 정규화(제/호/스팩 순서 차이 흡수)
         s = s.replace("스팩", "").replace("스펙", "")
         s = s.replace("제", "").replace("호", "")
-    return s
+    return _NAME_ALIAS.get(s, s)      # 별칭 통일(엘리스그룹=엘리스 등)
 
 def refresh_screening_status(kind_data, listings):
     """예심 탭 '현황' 재계산.
@@ -1388,7 +1435,8 @@ def build_excel(kind_data, kind_master, offering, listings):
     # 공모 진행: offering_master (상장일 확정된 건은 위 섹션으로 승격)
     prog = []
     for name, rec in offering.items():
-        if name in seed and seed[name].get("상장일"):
+        _t = seed.get(norm_index.get(_norm_name(name), name))   # 별칭·표기차 흡수(엘리스그룹=엘리스)
+        if _t and str(_t.get("상장일", "")).startswith("20"):
             continue
         prog.append(rec)
     order = {"청약완료·상장대기":0,"발행조건확정":1,"정정":2,"최초":3,"미제출":9}
@@ -1943,9 +1991,11 @@ function unlockSecret(){
   if(pw!=='1111*'){ box.innerHTML='<div class="err">비밀번호가 올바르지 않습니다.</div>'; return; }
   var h='<div class="ctrl"><button class="btn-dl" id="dl3">⬇ 엑셀</button></div>';
   // ① YoY 신규상장·공모규모
-  h+='<div class="sec">① 연도별(YoY) 신규상장 · 공모규모 <span class="cnt">(코스닥+유가 · 상장일 기준 · 동기간=올해 최신월까지)</span></div>';
+  h+='<div class="sec">① 연도별(YoY) 신규상장 · 공모규모 <span class="cnt">(상장일 기준 · 동기간=올해 최신월까지)</span></div>';
   h+=tbl(D.yoy||[], YOY);
-  h+='<div class="note">※ 동기간(YTD)은 각 연도 1월~올해 최신 상장월까지로 정렬해 같은 기간끼리 비교.</div>';
+  h+='<div class="note">※ 신규상장(건) 괄호 안은 스팩(공모) 제외 수치(스팩합병·코스닥 내 이전상장은 포함). '
+    +'2024·25는 코스닥+유가 공모 기준, 2026은 KIND 신규상장 전수(\'공모·상장\' 탭과 동일)라 '
+    +'스팩합병·이전상장 3건만큼 과거연도보다 넓은 기준. 동기간(YTD)은 각 연도 1월~올해 최신 상장월까지 정렬 비교.</div>';
   // ② 상장 후 주가 추이
   h+='<div class="sec">② 신규 상장기업 상장 후 주가 추이 <span class="cnt">('+(D.prices||[]).length+'종목 · 확정공모가 대비 등락)</span></div>';
   h+=tbl(priceRows(), PRICE, {tall:1, freeze:1});
@@ -2580,14 +2630,17 @@ def build_dashboard(kind_data, web, kind_master=None):
     yoy = []
     try:
         from openpyxl import load_workbook as _lwb
+        def _is_spac(nm):
+            nm = str(nm or ""); return ("스팩" in nm) or ("기업인수목적" in nm)
         _wb = _lwb(RAW_XLSX, data_only=True, read_only=True)
         cur_mo = int((kind_data.get("asof") or "2026-12")[5:7]) if len(str(kind_data.get("asof",""))) >= 7 else 12
-        agg = {y: {"건수": 0, "금액": 0.0, "ytd건수": 0, "ytd금액": 0.0} for y in (2024, 2025, 2026)}
+        agg = {y: {"건수": 0, "금액": 0.0, "ytd건수": 0, "ytd금액": 0.0, "스팩": 0} for y in (2024, 2025, 2026)}
         for sn in ("코스닥", "유가"):
             if sn not in _wb.sheetnames: continue
             ws = _wb[sn]; hdr = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
             try: i_ld = hdr.index("상장일"); i_am = hdr.index("공모금액(천원)")
             except ValueError: continue
+            i_nm = hdr.index("회사명") if "회사명" in hdr else None
             for row in ws.iter_rows(min_row=2, values_only=True):
                 ld = row[i_ld]
                 if not ld: continue
@@ -2598,15 +2651,34 @@ def build_dashboard(kind_data, web, kind_master=None):
                     except Exception: continue
                 if yy not in agg: continue
                 amt_eok = (float(row[i_am] or 0) / 1e5)   # 천원 → 억원
-                agg[yy]["건수"] += 1; agg[yy]["금액"] += amt_eok
+                sp = 1 if (i_nm is not None and _is_spac(row[i_nm])) else 0
+                agg[yy]["건수"] += 1; agg[yy]["금액"] += amt_eok; agg[yy]["스팩"] += sp
                 if mo <= cur_mo:
                     agg[yy]["ytd건수"] += 1; agg[yy]["ytd금액"] += amt_eok
+        _wb.close()
+        # 2026은 RAW 시드(2026-07에서 멈춤)가 아니라 KIND 상장완료(listed)로 교정 →
+        # '공모·상장' 탭과 기준 통일. 공모금액은 딜별 확정총액 합산(원→억).
+        # ※ 엘리스=엘리스그룹(명칭 불일치)·디티에스(공모 미파싱)는 listed 금액이 비어
+        #    DART 원문 확정총액으로 보정(두 건 상장완료라 금액 불변). 상위 파서 복구로
+        #    listed에 값이 차면 보정분은 자동 미적용(빈 경우에만 사용).
+        _PATCH = {"엘리스": 201_091_000_000, "디티에스": 41_234_964_500}
+        c26 = s26 = 0; amt26 = 0.0
+        for L in listed:
+            _nm = (L.get("기업명") or "").strip(); c26 += 1
+            if _is_spac(_nm): s26 += 1
+            _a = re.sub(r"[^\d]", "", str(L.get("공모금액", "")).split("(")[0])
+            _a = int(_a) if _a else 0
+            if _a == 0 and _nm in _PATCH: _a = _PATCH[_nm]
+            amt26 += _a / 1e8
+        agg[2026] = {"건수": c26, "금액": amt26, "ytd건수": c26,
+                     "ytd금액": amt26, "스팩": s26}
+        # 신규상장(건) 뒤에 '스팩 공모 제외' 수치 병기(스팩합병·코스닥내 이전상장은 포함).
         for y in (2024, 2025, 2026):
             a = agg[y]
-            yoy.append({"연도": f"{y}년", "상장건수": a["건수"],
+            yoy.append({"연도": f"{y}년",
+                        "상장건수": f'{a["건수"]:,} ({a["건수"] - a["스팩"]:,})',
                         "공모금액": f'{a["금액"]:,.0f}',
                         "YTD건수": a["ytd건수"], "YTD공모금액": f'{a["ytd금액"]:,.0f}'})
-        _wb.close()
     except Exception as e:
         print(f"  [경고] YoY 집계 실패(무시): {e}")
 
@@ -2723,8 +2795,10 @@ def export_ledgers(kind_master, offering, listings):
             seed.setdefault(nm, {"기업명": nm, "진행상태": "상장완료"})
             seed[nm]["상장일"] = l["상장일"]
     rows = list(seed.values())
+    _nseed = {_norm_name(k): v for k, v in seed.items()}
     for name, rec in (offering or {}).items():
-        if name in seed and seed[name].get("상장일", "").startswith("20"):
+        _t = _nseed.get(_norm_name(name))                       # 별칭·표기차 흡수(엘리스그룹=엘리스)
+        if _t and str(_t.get("상장일", "")).startswith("20"):
             continue
         d = dict(rec); d["기업명"] = name
         d["진행상태"] = rec.get("상태", ""); d["인수수수료"] = rec.get("인수대가", "")
@@ -2879,6 +2953,7 @@ def main():
     if os.path.exists(_cm):
         try: corp_map.update(json.load(open(_cm, encoding="utf-8")).get("corp_map", {}))
         except Exception: pass
+    corp_map.update(CORP_FIX)              # 동명이인 오매칭 강제 교정(저장값보다 우선)
     try:
         corp_map = resolve_corp_codes([l.get("회사명") for l in listings], corp_map)
     except Exception as e:
