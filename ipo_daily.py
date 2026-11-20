@@ -723,7 +723,22 @@ def extract_performance(text):
                 # 정합성: 최종배정 수량은 최초배정 수량과 같은 규모(배정건수·금액을 집으면 크게 어긋남).
                 # 통과 못 하면 틀린 값 대신 공란.
                 if chung and bae and first and 0.5 <= bae / first <= 2.0:
+                    if chung == bae:
+                        # 요약표 '청약현황 수량'에 배정수량을 그대로 적은 신고서(SK증권스팩14호: 1.00).
+                        # → 아래 '일반투자자 세부 배정현황'의 청약수량(A) 열을 합산해 쓴다(주관사별 표 여러 개도 합산).
+                        tail = text[seg.start(): seg.start() + 400000] if seg else ""
+                        tail = re.split(r"\n\s*5\.\s*기관투자자", tail)[0]
+                        tot = 0
+                        for ln in tail.splitlines():
+                            cc = [c.strip() for c in ln.split("|")]
+                            if len(cc) > 3 and re.fullmatch(r"[\d,]+\s*주?", cc[0] or "x"):
+                                v = _num(cc[2]); tot += v or 0
+                        if tot > bae:
+                            chung = tot
                     out["청약경쟁률"] = f"{chung/bae:,.2f}"
+                    # 11-18 이전 버그값(청약수량÷최종배정 건수) — 기존 저장값이 버그로 들어간 건지 판별용
+                    bc = _num(cells[bi - 1]) if bi - 1 < len(cells) else None
+                    if bc: out["_버그값"] = f"{_num(cells[ci])/bc:,.2f}"
                     break
     m = re.search(r"상장\s*예정일[^\d]{0,20}(\d{4})[.\s년]+(\d{1,2})[.\s월]+(\d{1,2})", text)
     if m: out["상장예정일"] = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
@@ -1089,8 +1104,19 @@ def track_offerings(approved_names, info=None, renames=None):
             corp_map[_new] = corp_map[_old]; _alias_cc[_new] = corp_map[_old]
         if _old in master:
             _orec = master.pop(_old)
-            if _new not in master:
-                _orec["회사명"] = _new; master[_new] = _orec
+            _cur = master.get(_new) or {}
+            # 두 기록을 합친다: 옛 기록을 바탕으로 새 기록의 '값이 있는' 칸을 덮어쓴다(새 쪽이 최신).
+            # 단 새 기록의 자리표시 상태(corp_code 미확보·신고서 대기 등)는 실제 상태를 덮지 않는다.
+            # (11-18 버그: 빈 '하나에어로' 기록 때문에 '하나에어로다이내믹스'의 공모정보가 통째로 버려짐)
+            _PH = ("corp_code 미확보(수동확인)", "신고서 대기(DART 미등록)", "미제출")
+            _mrg = dict(_orec)
+            for _k, _v in _cur.items():
+                if not str(_v if _v is not None else "").strip():
+                    continue
+                if _k == "상태" and _v in _PH and _orec.get("상태"):
+                    continue
+                _mrg[_k] = _v
+            _mrg["회사명"] = _new; master[_new] = _mrg
             print(f"  [이름변경 이관] {_old} → {_new}")
     if _alias_cc:
         # 새 이름 → corp_code를 corp_map.json에도 저장(상장 후 보강 단계가 새 이름으로 조회하므로).
@@ -1167,6 +1193,14 @@ def track_offerings(approved_names, info=None, renames=None):
         for _k in ("철회일", "재제출기한"):
             rec.pop(_k, None)              # 재제출로 진행 복귀 시 철회 표시 해제
         if _inf.get("승인일"): rec["승인일"] = _inf["승인일"]
+        if reg and "합병" in reg.get("report_nm", ""):
+            # 증권신고서(합병) = 스팩 소멸합병 상장. 밴드·수요예측·청약·공모금액이 원래 없다.
+            # 공모 신고서 파서를 돌리면 합병비율 산정 수치가 멀티플로 들어가는 등 잡값만 생긴다(럭스코 18.4).
+            for _k in ("밴드", "멀티플", "공모주식수", "공모금액", "모집가액", "인수인상세"):
+                rec.pop(_k, None)
+            rec.update({"상태": "스팩합병", "최신접수번호": reg["rcept_no"], "corp_code": code})
+            master[name] = rec
+            continue
         new_rcept = reg["rcept_no"] if reg else None
         if new_rcept:                      # 매번 최신 신고서 재파싱(개선 파서 적용)
             try:
@@ -1226,7 +1260,7 @@ def track_offerings(approved_names, info=None, renames=None):
         if perf and rec.get("실적보고서") != perf["rcept_no"]:
             try:
                 text = dart_document_text(perf["rcept_no"])
-                rec.update(extract_performance(text))
+                rec.update({k: v for k, v in extract_performance(text).items() if not k.startswith("_")})
                 changes.append(f"{name}: 실적보고서 반영 {perf['rcept_no']}")
             except Exception as e:
                 print(f"  [경고] {name} 실적 발췌 실패: {e}")
@@ -1273,6 +1307,7 @@ def recheck_subscription(offering):
             continue
         rec["청약경쟁률"] = new; rec["_청약v2"] = True
         row = by.get(_norm_name(nm))
+        if row is not None: row["_청약v2"] = True
         if row is not None and (not str(row.get("청약경쟁률") or "").strip()
                                 or row.get("청약경쟁률") == old):
             row["청약경쟁률"] = new
@@ -1300,6 +1335,60 @@ def recheck_subscription(offering):
     print(f"[청약 재검증] 대상 {len(todo)} · 교정 {len(fixed)} · 파싱실패 {len(failed)}")
     for f in fixed: print("   -", f)
     if failed: print("   ! 파싱실패(값 유지, 수동확인):", ", ".join(failed))
+
+
+def recheck_listed_seed(corp_map, renames):
+    """[1회성] 상장완료 행(listing_seed) 중 아직 재검증 표시(_청약v2)가 없는 행을 DART로 다시 본다.
+    공모추적 기록(offering_master)이 없거나 이름변경 이관 중 유실된 종목(엘리스 등)까지 커버.
+      · 청약경쟁률: 비었거나 '11-18 이전 버그값'과 같을 때만 교정(수기 입력값 보존)
+      · 확정공모가: 비었을 때만, 발행조건확정 신고서의 모집가액으로 채움(이에스티)
+    한 번 본 행은 '_청약v2' 표시 → 다음 실행부터 건너뜀."""
+    seed_p = os.path.join(BASE, "listing_seed.json")
+    if not os.path.exists(seed_p):
+        return
+    seed = json.load(open(seed_p, encoding="utf-8"))
+    rev = {}
+    for o, n in (renames or {}).items():
+        rev.setdefault(n, []).append(o)
+    fixed, done = [], 0
+    for row in seed:
+        nm = row.get("기업명", "")
+        if row.get("_청약v2") or not str(row.get("상장일", "")).startswith("20"):
+            continue
+        names = [nm, _clean_corp_name(nm)] + rev.get(nm, [])
+        codes = [c for c in dict.fromkeys(CORP_FIX.get(n) or corp_map.get(n) for n in names) if c]
+        fl = None
+        for c in codes:
+            try:
+                f2 = dart_list(c)
+            except Exception:
+                continue
+            if any("증권발행실적보고서" in (f.get("report_nm") or "") for f in f2) or _has_reg(f2):
+                fl = f2; break
+        if fl is None:
+            c2, f2 = _corp_with_filing(nm, codes[0] if codes else None)
+            fl = f2
+        done += 1
+        row["_청약v2"] = True
+        if not fl:
+            continue
+        reg, perf, status = latest_filing(fl)
+        try:
+            if perf:
+                ex = extract_performance(dart_document_text(perf["rcept_no"]))
+                new, cur = ex.get("청약경쟁률", ""), str(row.get("청약경쟁률") or "").strip()
+                if new and new != cur and (not cur or cur in ("1.00", ex.get("_버그값"))):
+                    row["청약경쟁률"] = new; fixed.append(f"{nm} 청약경쟁률 {cur or '공란'}→{new}")
+            if not str(row.get("확정공모가") or "").strip() and reg and status == "발행조건확정":
+                mp = extract_registration(dart_document_text(reg["rcept_no"])).get("모집가액", "")
+                if mp:
+                    row["확정공모가"] = mp; fixed.append(f"{nm} 확정공모가 공란→{mp}")
+        except Exception as e:
+            print(f"  [상장행 재검증] {nm} 실패(무시): {e}")
+    if done:
+        json.dump(seed, open(seed_p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        print(f"[상장행 재검증] 대상 {done} · 교정 {len(fixed)}")
+        for f in fixed: print("   -", f)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1357,7 +1446,20 @@ def collect_kind():
         for _old in _ks[1:]:
             _on = store[_old].get("회사명", "")
             if _on and _on != _new: renames[_on] = _new
-            store.pop(_old)
+            _orec = store.pop(_old); _krec = store[_keep]
+            # 두 레코드를 합친다: 최신 표기 레코드가 우선, 비어 있는 칸은 옛 레코드로 채움.
+            for _k, _v in _orec.items():
+                if _k not in _krec or not str(_krec.get(_k) or "").strip():
+                    _krec[_k] = _v
+            # 최초수집은 더 이른 쪽, 상태변경이력은 양쪽 합쳐 시간순(중복 제거)
+            _krec["최초수집"] = min(x for x in (_orec.get("최초수집"), _krec.get("최초수집")) if x) \
+                if (_orec.get("최초수집") or _krec.get("최초수집")) else ""
+            _hist = {json.dumps(h, ensure_ascii=False, sort_keys=True): h
+                     for h in (_orec.get("상태변경이력") or []) + (_krec.get("상태변경이력") or [])}
+            _krec["상태변경이력"] = sorted(_hist.values(), key=lambda h: h.get("시각", ""))
+            if _on and _on != _new:
+                _krec.setdefault("이전회사명", [])
+                if _on not in _krec["이전회사명"]: _krec["이전회사명"].append(_on)
             changed.append(f"중복정리\t{_old}\t-> {_keep}")
     kw.save_json(kw.MASTER, master)
 
@@ -1581,7 +1683,7 @@ def _prog_status(x):
     if st == "공모철회":
         due = x.get("재제출기한", "")
         return f"공모철회 (재제출기한 {due[2:]})" if due else "공모철회"
-    return {"미제출": "신고서 대기"}.get(st, st)
+    return {"미제출": "신고서 대기", "스팩합병": "스팩합병(공모 없음)"}.get(st, st)
 
 
 def build_excel(kind_data, kind_master, offering, listings):
@@ -1761,7 +1863,7 @@ def build_excel(kind_data, kind_master, offering, listings):
         if _t and str(_t.get("상장일", "")).startswith("20"):
             continue
         prog.append(rec)
-    order = {"청약완료·상장대기":0,"발행조건확정":1,"정정":2,"최초":3,"공모철회":8,
+    order = {"청약완료·상장대기":0,"발행조건확정":1,"정정":2,"최초":3,"스팩합병":7,"공모철회":8,
              "미제출":9,"신고서 대기(DART 미등록)":9}
     prog.sort(key=lambda x: (order.get(x.get("상태",""),5), x.get("수요예측기간","") or "zz"))
     section("공모 진행 (예심 승인법인)", len(prog))
@@ -3250,6 +3352,10 @@ def main():
     # [3] DART 공모 추적 (승인법인, 재상장 제외)
     approved, track_info = [], {}
     _renames = dict(kind_master.get("renames", {}))
+    _listed_now = {_norm_name(l.get("회사명", "")) for l in listings
+                   if str(l.get("상장일", "")).startswith("20")}
+    _listed_now |= {_norm_name(x.get("기업명", "")) for x in _load_listing_seed()
+                    if str(x.get("상장일", "")).startswith("20")}
     for rec in kind_master["records"].values():
         _res = rec.get("심사결과","").replace(" ","")
         _rd = (rec.get("결과확정일","") or "")[:10]
@@ -3257,6 +3363,12 @@ def main():
             continue
         _kwd = ""
         if _res == "심사승인" and _rd.startswith(kind_data["year"]):
+            pass
+        elif (_res == "상장승인" and _rd.startswith(kind_data["year"])
+              and "합병" not in (rec.get("상장유형") or "")
+              and _norm_name(rec["회사명"]) not in _listed_now):
+            # 거래소 '상장승인'(청약 후 ~ 상장 직전)도 상장일 확정 전까지는 계속 추적한다.
+            # 안 그러면 마지막 며칠 사이 신고서·실적보고서가 끊겨 빈 행이 남는다(하나에어로 11-19).
             pass
         elif _res == "공모철회" and _rd and TODAY_ISO <= _add_months(_rd, WITHDRAW_MONTHS):
             # 공모철회도 재제출기한까지는 계속 추적(재제출 감지 + 기한 경과 시 삭제).
@@ -3289,6 +3401,15 @@ def main():
                 recheck_subscription(offering)
             except Exception as e:
                 print(f"[청약 재검증] 실패(무시): {e}")
+            try:
+                _cmr = dict(CORP_SEED)
+                _cmp = os.path.join(BASE, "corp_map.json")
+                if os.path.exists(_cmp):
+                    _cmr.update(json.load(open(_cmp, encoding="utf-8")).get("corp_map", {}))
+                _cmr.update(CORP_FIX)
+                recheck_listed_seed(_cmr, _renames)
+            except Exception as e:
+                print(f"[상장행 재검증] 실패(무시): {e}")
         except Exception as e:
             import traceback
             print(f"[DART] 공모 추적 실패(무시, 캐시 사용): {e}")
